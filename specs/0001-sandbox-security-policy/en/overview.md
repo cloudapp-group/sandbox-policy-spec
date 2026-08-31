@@ -184,7 +184,7 @@ Each phase is independently valuable and shippable.
 
 ## 13. References
 
-- [Egress Network Policy](../../guide/network-policy.md) — current egress chain
-- [Security Proxy](../../guide/security-proxy.md) — current L7 rule grammar
-- [Restrict Public Access](../../guide/restrict-public-access.md) — current ingress gating
-- [Authentication](../../guide/authentication.md)
+- [Egress Network Policy](../../../guide/network-policy.md) — current egress chain
+- [Security Proxy](../../../guide/security-proxy.md) — current L7 rule grammar
+- [Restrict Public Access](../../../guide/restrict-public-access.md) — current ingress gating
+- [Authentication](../../../guide/authentication.md)

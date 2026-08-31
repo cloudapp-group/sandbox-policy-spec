@@ -78,14 +78,19 @@
 
 ```
 .
-├── specs/0001-sandbox-security-policy/
-│   ├── overview.md      # 共享模型、合并语义、原则、兼容性
-│   ├── network.md       # 网络子策略
-│   ├── filesystem.md    # 文件系统子策略
-│   ├── exec.md          # 命令执行子策略
-│   └── resource.md      # 资源限制、治理与 LLM Token 计量
-└── zh/specs/0001-sandbox-security-policy/
-    └── ...              # 规范的中文翻译
+└── specs/0001-sandbox-security-policy/
+    ├── en/
+    │   ├── overview.md      # Shared model, merge semantics, principles, compatibility
+    │   ├── network.md       # Network sub-policy
+    │   ├── filesystem.md    # Filesystem sub-policy
+    │   ├── exec.md          # Command execution sub-policy
+    │   └── resource.md      # Resource limits, governance, and LLM token accounting
+    └── zh/
+        ├── overview.md      # 共享模型、合并语义、原则、兼容性
+        ├── network.md       # 网络子策略
+        ├── filesystem.md    # 文件系统子策略
+        ├── exec.md          # 命令执行子策略
+        └── resource.md      # 资源限制、治理与 LLM Token 计量
 ```
 
 ---

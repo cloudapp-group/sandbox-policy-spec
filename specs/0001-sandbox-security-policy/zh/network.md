@@ -11,7 +11,7 @@
 - **出站（Egress）** — L3/L4 可达性（IP/CIDR、基于域名的 DNS 学习）与 L7 HTTP/HTTPS 规则。
 - **入站（Ingress）** — 对沙箱公开入站访问的门控。
 
-本规格**不重新定义**既有出站语法。`allowOut` / `denyOut` 的目标语法、`rules` 的 L7 规则语法、DNS 白名单与学习行为、内置私网 CIDR 拒绝均已由[出站网络策略](../../guide/network-policy.md)与[安全代理](../../guide/security-proxy.md)规定；上述文档以引用方式并入本规格。本规格将其包装进统一策略对象，并定义合并、默认值与兼容性契约。
+本规格**不重新定义**既有出站语法。`allowOut` / `denyOut` 的目标语法、`rules` 的 L7 规则语法、DNS 白名单与学习行为、内置私网 CIDR 拒绝均已由[出站网络策略](../../../guide/network-policy.md)与[安全代理](../../../guide/security-proxy.md)规定；上述文档以引用方式并入本规格。本规格将其包装进统一策略对象，并定义合并、默认值与兼容性契约。
 
 ## 2. 对象模型
 

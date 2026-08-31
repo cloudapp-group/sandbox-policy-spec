@@ -184,7 +184,7 @@ DELETE /policies/{id}       删除（仍有沙箱引用时拒绝）
 
 ## 13. 参考资料
 
-- [出站网络策略](../../guide/network-policy.md) — 现有出站链路
-- [安全代理](../../guide/security-proxy.md) — 现有 L7 规则语法
-- [限制公开访问](../../guide/restrict-public-access.md) — 现有入站门控
-- [认证](../../guide/authentication.md)
+- [出站网络策略](../../../guide/network-policy.md) — 现有出站链路
+- [安全代理](../../../guide/security-proxy.md) — 现有 L7 规则语法
+- [限制公开访问](../../../guide/restrict-public-access.md) — 现有入站门控
+- [认证](../../../guide/authentication.md)

@@ -11,7 +11,7 @@ This spec defines the network sub-policy of the `SandboxPolicy` object:
 - **Egress** — L3/L4 reachability (IP/CIDR, domain-based with DNS learning) and L7 HTTP/HTTPS rules.
 - **Ingress** — gating of public inbound access to the sandbox.
 
-This spec **does not redefine** the existing egress grammar. The target syntax for `allowOut` / `denyOut`, the L7 rule grammar for `rules`, the DNS allow-listing and learning behavior, and the built-in private-CIDR denies are already specified by [Egress Network Policy](../../guide/network-policy.md) and [Security Proxy](../../guide/security-proxy.md). Those documents are incorporated by reference; this spec wraps them in the unified policy object and defines the merge, default, and compatibility contract.
+This spec **does not redefine** the existing egress grammar. The target syntax for `allowOut` / `denyOut`, the L7 rule grammar for `rules`, the DNS allow-listing and learning behavior, and the built-in private-CIDR denies are already specified by [Egress Network Policy](../../../guide/network-policy.md) and [Security Proxy](../../../guide/security-proxy.md). Those documents are incorporated by reference; this spec wraps them in the unified policy object and defines the merge, default, and compatibility contract.
 
 ## 2. Object model
 
