@@ -19,9 +19,12 @@
 policy:
   filesystem:
     mode:            baseline | unrestricted   # 默认: baseline
+    baselineVersion: string                    # 如 "baseline/1"；默认：平台默认值
+    baselineExceptions: [string]               # 从基线集合中排除的路径
     denyPaths:       [string]                  # 完全禁止访问
     readOnlyPaths:   [string]                  # 允许读、禁止写
     writableRoots:   [string]                  # 反向表述：仅这些根下可写
+    implicitRuntimeWritable: bool              # 默认: true
     mounts:
       allowedHostPrefixes: [string]            # 可挂载的宿主路径
       defaultReadOnly:     bool                # 默认: false
@@ -55,12 +58,12 @@ policy:
 
 对沙箱任意进程的任意文件系统访问，判定**必须**为：
 
-1. 解析后的路径命中任一 `denyPaths` 模式（或内置基线集合，§6）→ **拒绝一切访问**（`EACCES`）。
-2. 否则若 `writableRoots` 非空且解析后的路径不命中任何 `writableRoots` 模式 → **只读**（写操作以 `EACCES`/`EROFS` 失败）。
+1. 解析后的路径命中任一 `denyPaths` 模式，或命中生效基线集合（§6）的任一模式 → **拒绝一切访问**（`EACCES`）。
+2. 否则若 `writableRoots` 非空且解析后的路径既不命中任何 `writableRoots` 模式、也不命中隐式运行时可写集合（§6.4）→ **只读**（写操作以 `EACCES`/`EROFS` 失败）。
 3. 否则若命中任一 `readOnlyPaths` 模式 → **只读**。
 4. 否则 → 默认（可读写，受镜像层权限约束）。
 
-`denyPaths` 永远优先于 `writableRoots` 与 `readOnlyPaths`。规则 2 与规则 3 是互斥的两种表述方式；约束见 §5。
+`denyPaths` 永远优先于 `writableRoots`、`readOnlyPaths` 与隐式运行时可写集合。规则 2 与规则 3 是互斥的两种表述方式；约束见 §5。
 
 ### 4.3 强制执行要求
 
@@ -81,15 +84,20 @@ policy:
 | 字段 | 类型 | 约束 | 默认值 | 语义 |
 | --- | --- | --- | --- | --- |
 | `mode` | `enum?` | `baseline` \| `unrestricted` | `baseline` | `baseline` 附加内置敏感路径拒绝集（§6）。`unrestricted` 仅应用显式声明的规则。 |
+| `baselineVersion` | `string?` | 已发布的基线集合标识符。未知取值**必须**以 `400 INVALID_POLICY` 拒绝。 | 平台默认值 | 固定内置拒绝集的版本（§6.2）。 |
+| `baselineExceptions` | `[string]?` | 每个条目**必须**与所固定基线集合中的某个模式完全一致。 | `[]` | 从基线集合中排除的路径（§6.3）。 |
 | `denyPaths` | `[string]?` | 模式语法 §3。 | `[]`（+ 基线集合） | 一切访问均被拒绝。 |
 | `readOnlyPaths` | `[string]?` | 模式语法 §3。`writableRoots` 非空时**必须**为空。 | `[]` | 允许读；写/创建/删除被拒绝。 |
-| `writableRoots` | `[string]?` | 模式语法 §3。`readOnlyPaths` 非空时**必须**为空。 | `[]` | 非空时，仅这些根之下允许写。 |
+| `writableRoots` | `[string]?` | 模式语法 §3。`readOnlyPaths` 非空时**必须**为空。 | `[]` | 非空时，仅这些根之下允许写（加 §6.4）。 |
+| `implicitRuntimeWritable` | `bool?` | — | `true` | `writableRoots` 非空时运行时可写集合是否生效（§6.4）。 |
 | `mounts.allowedHostPrefixes` | `[string]?` | 宿主绝对路径，不允许通配。 | 运维配置 | 哪些宿主路径可挂载进该沙箱。 |
 | `mounts.defaultReadOnly` | `bool?` | — | `false` | 未显式指定模式的挂载的默认可写性。 |
 
 违反 `readOnlyPaths`/`writableRoots` 互斥约束**必须**以 `400 INVALID_POLICY` 失败，并同时指名两个字段。
 
 ## 6. 默认值
+
+### 6.1 基线拒绝集 `baseline/1`
 
 内置基线拒绝集（`mode: baseline` 时生效）：
 
@@ -107,9 +115,48 @@ denyPaths:
   - /etc/gshadow
 ```
 
-基线的存在是为了阻断沙箱内的凭据窃取：以沙箱用户身份运行的 Agent 生成代码**不得**能够读取正是该用户用于向外部服务认证的凭据。v1 刻意将其定为**固定集合** —— 不允许不经 `denyPaths` 的用户扩展 —— 以保持语义可预期。
+基线的存在是为了阻断沙箱内的凭据窃取：以沙箱用户身份运行的 Agent 生成代码**不得**能够读取正是该用户用于向外部服务认证的凭据。
+
+**生效基线集合**是所固定版本的集合减去 `baselineExceptions`（§6.3）。
 
 `mode: unrestricted` **必须**在生效策略中被显式表示；它绝不由缺省产生。
+
+### 6.2 基线版本化与演进
+
+凭据的存放位置会不断被发明出来，所以集合必然要长。而扩充一个*固定的、无版本的*集合，会使每一次新增对那些合法读取该路径的模板构成 break change。因此版本化在 v1 就是规范性的，不拖到实现期：
+
+1. 基线集合是**带版本且不可变**的。`baseline/1` 就是 §6.1 的集合；已发布的版本**不得**被原地修改。
+2. 新版本**只得增加**路径。删去一个路径会削弱所有解析到该版本的策略，因此**必须**改走已公告的弃用周期。
+3. `baselineVersion` 固定集合。生效策略**必须**始终显式记录**解析后**的版本 —— 包括策略并未固定版本的情形 —— 以使该版本出现在策略快照中（[overview.md](./overview.md) §4.1）。
+4. 未固定版本的策略解析到平台的**默认基线版本**。将该默认值向前滚动是一次带弃用窗口的、经公告的平台变更；它**不得**静默发生，也**不得**影响已固定版本的策略。
+5. 沙箱在其整个生命周期内保持其生效策略中记录的版本。新基线版本只能通过一次策略更新抵达运行中的沙箱，而那会产生一个新的 `effectivePolicyVersion`。
+
+无法容忍任何未来新增的模板就固定一个版本；希望跟上新凭据位置的模板就不固定。无论哪种，选择都是显式且可审计的。
+
+### 6.3 显式退出：`baselineExceptions`
+
+`baselineExceptions` 是那个窄口径的退出手段，用于确实合法需要基线中某一条路径、而用 `mode: unrestricted` 抛弃整个基线又不成比例的场景。
+
+1. 每个条目**必须**与所固定基线集合中的某个模式完全一致。什么都匹配不上的条目**必须**以 `400 INVALID_POLICY` 拒绝 —— 否则当基线演进时，一条例外会静默地变成死配置。
+2. 例外**仅**作用于内置集合。它们**不得**抵消任何来源的显式 `denyPaths` 条目。
+3. 合并为**交集**：仅当每个贡献来源都声明了某条例外，它才生效（只能收窄，[overview.md](./overview.md) §5）。
+4. 每一条生效的例外**必须**被记录在生效策略中，并**必须**在沙箱创建时发出审计事件，使「这个沙箱可以读 `/home/*/.aws`」永不对运维方隐形。
+
+### 6.4 隐式运行时可写集合
+
+`writableRoots` 非空时，其外的一切就变成只读 —— 包括普通工具链默认自己能写的临时目录。一份没有考虑到这一点的 `writableRoots: [/workspace]` 策略会搞坏 `pip`、`npm`、编译器以及任何调用 `mkstemp` 的东西，而且它们坏掉的方式是令人困惑的构建失败，而不是可读的策略拒绝。
+
+因此，当 `writableRoots` 非空时，以下路径**隐式可写**，除非 `implicitRuntimeWritable: false`：
+
+```yaml
+- /tmp
+- /var/tmp
+- /dev/shm
+```
+
+1. 隐式集合对 `writableRoots` 是可加的。它绝不覆盖 `denyPaths` 或基线集合 —— 后两者在 §4.2 第 1 步仍然胜出。
+2. `implicitRuntimeWritable: false` 去掉隐式集合，用于确实只想要一个可写根的策略。这类策略**应该**在 `writableRoots` 中自行列出其镜像所需的临时目录。
+3. 强制执行**不得**去读 `TMPDIR` 或任何其他环境变量来发现临时目录：§4.3.2 禁止这样做，而且环境变量是工作负载可控的。镜像把 `TMPDIR` 指向隐式集合之外的部署，**必须**把该路径显式加入 `writableRoots`；当平台能从模板配置中检测到这一不匹配时，它**应该**在创建时发出 `policyWarnings` 条目 `{reason: "tmpdir_outside_writable_roots"}`。
 
 ## 7. 合并语义
 
@@ -118,14 +165,17 @@ denyPaths:
 | 字段 | 合并细化 |
 | --- | --- |
 | `mode` | 最严格者胜：任一来源为 `baseline`，结果即 `baseline`。 |
+| `baselineVersion` | 所固定的最新版本胜。因为版本只会增加路径（§6.2.2），最新也就是最严格。 |
+| `baselineExceptions` | 各来源取交集：仅当每个来源都声明了某条例外，它才生效。 |
 | `denyPaths` | 追加 + 去重（含生效中的基线集合）。 |
 | `readOnlyPaths` / `writableRoots` | 追加 + 去重。互斥约束在**合并后**的结果上校验，而非逐来源校验。 |
+| `implicitRuntimeWritable` | `false` 胜（最严格）。 |
 | `mounts.allowedHostPrefixes` | 各来源取交集（挂载面只能收窄，不能放宽）。 |
 | `mounts.defaultReadOnly` | `true` 胜（最严格）。 |
 
 ## 8. 错误
 
-配置错误（创建/更新时）：`400 INVALID_POLICY`（模式格式错误、违反互斥约束）、`400 POLICY_FS_MOUNT_FORBIDDEN`（宿主路径超出白名单）。
+配置错误（创建/更新时）：`400 INVALID_POLICY`（模式格式错误、违反互斥约束、未知的 `baselineVersion`、`baselineExceptions` 条目不在所固定的基线集合中）、`400 POLICY_FS_MOUNT_FORBIDDEN`（宿主路径超出白名单）。
 
 强制执行错误是 OS 层的，不是 API 层的，因为策略作用于 API 表面之下：
 
@@ -142,13 +192,14 @@ denyPaths:
 
 1. 文件系统拒绝**应该**以配置的审计级别输出审计事件 `{sandboxID, rule (模式), path, op (read|write|...), outcome: denied}`；`mode: unrestricted` 关闭基线集合事件，但不关闭显式 `denyPaths` 事件。
 2. 审计载荷**不得**包含文件内容。
+3. 每一条生效的 `baselineExceptions` 条目**必须**在沙箱创建时发出审计事件 `{sandboxID, baselineVersion, exception, sources}`（§6.3.4）。削弱基线是一个事件，而不是一个静默的字段。
 
 ## 10. 开放问题
 
 1. **热应用。** 更新后的文件系统策略能否作用于已运行进程，还是只能作用于新进程？内核规则集重应用语义因机制而异；规格需要一个稳定答案。
-2. **基线集合演进。** 内置集合如何扩展（新的凭据位置）而不破坏合法读取其中某路径的模板？
+2. **默认版本的滚动。** §6.2.4 要求默认基线版本移动前先有一个经公告的弃用窗口。该窗口多长？通过什么渠道公告？
 3. **执行位。** 规格是否应区分执行权限与读权限？v1 将执行问题交给网络/命令执行策略；待确认。
-4. **写 `/etc` 的镜像。** 一些包管理器会写 `/etc`。`baseline` 是否需要镜像级注解来豁免特定路径？
+4. **镜像级声明。** `baselineExceptions` 是按策略的。如果未来某个基线版本拒绝了某个*镜像*合法需要的路径，按策略的例外够吗，还是需要镜像声明一次、使所有用该镜像的策略都继承它？
 
 ## 11. 非规范性说明
 

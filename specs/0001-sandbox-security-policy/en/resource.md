@@ -114,9 +114,31 @@ All windows are fixed and aligned to UTC:
 Explicit precedence, because token usage is knowable only from the API transaction itself:
 
 1. **Response-side accounting (preferred).** When a sandbox request to an LLM API flows through the platform's outbound HTTP/HTTPS path, the `usage` field of the response is authoritative for that request's token counts.
-2. **Explicit report (fallback).** `sandbox.report_usage()` on the SDK lets the caller report usage that response-side accounting cannot observe (non-HTTP providers, streaming edge cases). Reported usage is added to the counters with its own provenance flag.
+2. **Explicit report (fallback).** `sandbox.report_usage()` on the SDK lets the caller report usage that response-side accounting cannot observe (non-HTTP providers, providers that omit `usage`). It MUST be authenticated as a principal authorized to manage the sandbox, on the same terms as the approval API (§7.4) — untrusted in-sandbox code MUST NOT be able to write its own counters.
 
-Counters MUST NOT be incremented from inside the sandbox by untrusted code.
+### 5.3 Streaming, retries, and partial consumption
+
+In practice most token spend arrives over streamed responses that may be retried or cut short. Leaving those cases to the implementation guarantees a billing dispute later, so the accounting is fixed here.
+
+| Case | Rule |
+| --- | --- |
+| Non-streamed response | The response's `usage` is authoritative; metered once, on completion. |
+| Streamed response completing normally | Metered when the stream terminates; the `usage` payload of the **final chunk** is authoritative. |
+| Streamed response terminating **without** a `usage` payload — client abort, sandbox timeout, transport error, provider omission | Usage MUST still be metered, from an **estimate** derived from the content actually observed on the wire. Metering MUST NOT be skipped: skipping it would make "abort just before the final chunk" a free-token bypass. |
+| Retry, whether the sandbox retried or the platform did | Each provider attempt is metered **independently**, because providers bill per attempt. |
+| Attempt that produced no tokens — connection failure, or an HTTP error before any content | Meters zero. |
+| Sandbox killed or paused mid-request | Metered by the rules above. Ending a sandbox does not erase consumption already incurred. |
+
+1. An estimate MUST be a **lower bound** on actual usage: it counts what was observed and never adds a speculative markup. This keeps the corrections in §5.4 additive, and keeps the platform from over-charging for its own uncertainty.
+2. Platform-internal retries MUST be attributed to the sandbox that caused them.
+3. These rules govern *metering*. Whether a metered amount is *billable* is a pricing question and out of scope (§1).
+
+### 5.4 Provenance and corrections
+
+1. Every metered amount carries a `provenance` flag: `response` (an authoritative `usage` payload), `estimated` (§5.3), or `reported` (§5.2.2).
+2. Provenance MUST be exposed through usage (§9) so a platform can bill, alert on, or reconcile estimated amounts differently from authoritative ones.
+3. If an authoritative `usage` payload for a request arrives after an estimate was already metered, the difference MUST be applied as an additional **positive** delta. A negative correction MUST NOT be applied, because window and lifetime counters are non-decreasing (§4.2.2) — the lower-bound requirement of §5.3.1 is what makes this sound rather than merely convenient.
+4. Counters MUST NOT be incremented from inside the sandbox by untrusted code.
 
 ## 6. Exceed actions
 
@@ -178,7 +200,8 @@ The default is `hold`: configuring a limit is opting into governance, and hold i
        "llmTokens": {
          "total": {
            "current": {"minute": 3500, "day": 155000, "lifetime": 1200000},
-           "limits":  {"minute": 10000, "day": 1000000, "month": 50000000}
+           "limits":  {"minute": 10000, "day": 1000000, "month": 50000000},
+           "provenance": {"response": 1150000, "estimated": 40000, "reported": 10000}
          }
        }
      },
@@ -187,8 +210,9 @@ The default is `hold`: configuring a limit is opting into governance, and hold i
    ```
 
 2. `limits` reports the effective configured windows; `current` reports the in-window counters for the configured windows. Lifetime counters MUST be reported even when no lifetime limit is configured (billing needs them).
-3. `state.exhausted` lists the currently-exceeded (dimension, window) pairs; `state.held` is true while a hold is pending.
-4. The SDK exposes the same object as `sandbox.resource`.
+3. For `llmTokens` dimensions, `provenance` reports the lifetime split of how the amounts were learned (§5.4). The three values MUST sum to the lifetime counter, so a tenant can see how much of a bill rests on estimates.
+4. `state.exhausted` lists the currently-exceeded (dimension, window) pairs; `state.held` is true while a hold is pending.
+5. The SDK exposes the same object as `sandbox.resource`.
 
 ## 10. Merge semantics
 
@@ -222,6 +246,11 @@ On top of [overview.md](./overview.md) §5:
 7. Simultaneous exceedance resolves to the most severe action.
 8. Restore/clone: policy inherited, all counters zero.
 9. Merged per-window limits take the minimum; merged actions take the most severe.
+10. **Streaming.** A stream that completes normally meters the final chunk's `usage` with provenance `response`. The same stream aborted before its final chunk still meters a non-zero amount with provenance `estimated`, and that amount is no greater than what the completed stream metered.
+11. **Retries.** Three provider attempts that each return `usage` meter three times; an attempt that fails before any content meters zero. Platform-initiated retries are attributed to the originating sandbox.
+12. **Late correction.** An authoritative `usage` arriving after an estimate applies a positive delta only; no counter ever decreases.
+13. **Provenance exposure.** The `response` / `estimated` / `reported` split is reported and sums to the lifetime counter.
+14. `report_usage` called with sandbox-scoped credentials is rejected.
 
 ## 13. Open questions
 
@@ -233,6 +262,8 @@ On top of [overview.md](./overview.md) §5:
 6. **Grant visibility.** Should grants appear in `resource.usage` (e.g. an `allowance` field) so platforms can bill for approved overage?
 7. **Per-window actions.** Should `onExceeded` be settable per window rather than per dimension (e.g. `minute`→`pause`, `month`→`hold` on the same dimension)?
 8. **Counter inheritance on restore/clone.** Reset is proposed here; should inheritance be available as an operator choice?
+9. **Estimation method.** §5.3 fixes the *properties* of an estimate (lower bound, derived from observed content) but not the algorithm. Should the algorithm and its expected error be published, so tenants can audit the estimated portion of their usage?
+10. **Cached and reasoning tokens.** Providers increasingly meter cache reads and reasoning tokens separately. Do those become their own dimensions, or fold into `input` / `output`?
 
 ## 14. Non-normative notes
 

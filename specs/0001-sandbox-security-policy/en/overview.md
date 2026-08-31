@@ -6,7 +6,8 @@
 | **Proposal** | 0001 (document set) |
 | **Authors** | _(add yourself when you pick up a section)_ |
 | **Created** | 2026-08 |
-| **Discussion** | GitHub Issue: _(link to be added when the tracking issue is opened)_ |
+| **Discussion** | GitHub Issue: _**not yet opened — Phase 0 blocker.** Until the tracking issue exists, review comments have nowhere durable to live._ |
+| **Source of truth** | The English documents under `specs/0001-sandbox-security-policy/en/` are normative. The `zh/` set is a translation that MAY lag; on any discrepancy the English text governs. |
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to be interpreted as described in RFC 2119.
 
@@ -64,6 +65,25 @@ A unified policy gives CubeSandbox:
 - One default security baseline, on by default.
 - One place to audit and observe ("why was this denied?").
 
+### 2.3 Defense-in-depth matrix
+
+No single module is a boundary on its own. Each answers a specific threat, and they are only meaningful as layers. This matrix exists so that nobody sizes a threat model against the wrong module.
+
+| Module | Primary threat it answers | Enforcement surface | Does **not** cover |
+| --- | --- | --- | --- |
+| **Network** | Data exfiltration; reaching internal services and metadata endpoints | Every packet leaving the sandbox, whichever process sent it | What the code does locally; data already leaked through an allowed channel |
+| **Filesystem** | In-sandbox credential theft; host-mount abuse | Every filesystem access by **every** process | Secrets already in process memory or passed as env vars |
+| **Resource** | Runaway loops, token burn, noisy-neighbour effects | Kernel accounting + outbound HTTP metering, per sandbox | Actions that are harmful but cheap |
+| **Exec** | Injected or mistaken commands arriving **through the control interface** | Only executions initiated through the sandbox control interface | Processes the workload starts on its own |
+
+The asymmetry in the last row is deliberate and load-bearing:
+
+- `exec` policy is a **control-interface gate**. It is the right tool against instructions that reach the sandbox through the API (a prompt-injected agent step, a compromised orchestrator) and against operator error (unbounded timeouts, wrong user).
+- It is **not** a containment boundary for code already running inside the sandbox. A process admitted once by `exec` may `fork`/`exec` anything the image contains without further `exec` evaluation. In the agent-generated-code scenario the first admitted command is typically an interpreter or a build tool, so the *practical* protection surface of an `exec` allowlist is small — see [exec.md](./exec.md) §1 and §3.6.
+- Containment for self-started processes comes from `filesystem` (what it may read and write), `network` (where it may send), and `resource` (how much it may consume). Those three are mandatory-enforcement layers under principle 5 (§6).
+
+Therefore: size a threat model on **network + filesystem + resource**, and treat `exec` as hardening — never as the boundary.
+
 ## 3. Document set
 
 This proposal is a set of five documents. This overview defines the shared object model, merge semantics, error model, and compatibility rules that all module specs build on. Each module spec is a standalone, normative specification of one domain.
@@ -109,6 +129,27 @@ GET    /policies/{id}       inspect a profile (with resolved defaults)
 DELETE /policies/{id}       delete (refusing while sandboxes reference it)
 ```
 
+### 4.1 Policy identity and versioning
+
+An effective policy is not only computed, it is **identifiable**. Compliance review asks "which policy was this sandbox actually running at 14:03 yesterday?", and that question MUST be answerable from stored records, without re-running merge logic against sources that have since changed.
+
+1. Every effective policy carries an `effectivePolicyVersion`: an integer starting at 1 for the sandbox, incremented on every change to that sandbox's effective policy — including hot updates and changes picked up from a profile.
+2. Every effective policy carries `policySources`: the identity and revision of each contributing source — `{template, templateRevision, policyID, policyRevision, inline}`.
+3. Policy Profiles are **revisioned**. `POST /policies` against an existing name creates a new immutable revision; it MUST NOT mutate an existing one in place. A revision MUST be retained while any snapshot or audit record references it, even after the profile is deleted.
+4. Every change to a sandbox's effective policy MUST produce an immutable **snapshot** holding the fully resolved policy, its version, its sources, and the timestamp and principal that caused the change.
+5. Snapshots MUST be retrievable for the sandbox's whole lifetime, and for a deployment-configured retention period after termination.
+6. Every denial audit event, in every module, MUST carry the `effectivePolicyVersion` in force at the moment of the denial, so a denial can be joined to the exact policy text that produced it.
+
+```
+GET /sandboxes/{id}/policy                  current effective policy + version + sources
+GET /sandboxes/{id}/policy/history          snapshot list (version, at, principal, sources)
+GET /sandboxes/{id}/policy/history/{ver}    one immutable snapshot
+GET /policies/{id}/revisions                profile revision list
+GET /policies/{id}/revisions/{rev}          one immutable profile revision
+```
+
+This is what makes profile reuse auditable: "already-running sandboxes pick up the change, where the module supports it" is observable precisely because each pickup is a new version with a snapshot. A module that cannot hot-update says so in its own spec; it MUST NOT silently diverge from the version it reports.
+
 ## 5. Shared merge semantics
 
 When more than one policy source is present, the effective policy is computed once, at create time, by the following rules. Module specs define per-field refinements.
@@ -120,6 +161,9 @@ When more than one policy source is present, the effective policy is computed on
 | List fields (`allowOut`, `denyPaths`, ...) | Higher-precedence entries are appended to lower-precedence entries, then deduplicated. |
 | Rule lists (`rules`, exec command rules) | Higher-precedence rules sort **before** lower-precedence rules; evaluation is first-match-wins. |
 | Mode fields (`exec.mode`, `filesystem.mode`) | The most restrictive mode wins. |
+| **Narrow-only restrictions** | A restriction contributed by a lower-precedence source MUST NOT be removable, overridable, or punched through by a higher-precedence source. Higher precedence may narrow the boundary; it may never widen it. Module specs name the fields this governs — network binding denies and `allowInternetAccess`, `exec.allowedUsers`, `filesystem.mounts.allowedHostPrefixes` and `filesystem.baselineExceptions`, `resource.limits`. |
+
+Where a higher-precedence source asks for something the narrow-only rule forbids, the module spec MUST specify one of two outcomes and never a silent third: reject the request (`400`, for a direct contradiction such as flipping a boolean), or accept the request and report the ineffective part in a `policyWarnings` array on the response (for an entry that is merely shadowed).
 
 ## 6. Shared principles
 
@@ -137,7 +181,7 @@ Defaults follow the "safe by default" principle. Exact values are normative in e
 | Module | Default baseline | Opt-out |
 | --- | --- | --- |
 | Network | Today's behavior: internet egress allowed, with built-in private-CIDR denies. | `allowInternetAccess: false`. |
-| Filesystem | Sensitive credential paths denied (`~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc/shadow`). | `mode: unrestricted`. |
+| Filesystem | Sensitive credential paths denied — versioned baseline set `baseline/1` (`~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc/shadow`, ...). | `mode: unrestricted` for all of it, or `baselineExceptions` for named paths. |
 | Exec | `unrestricted` mode with a wall-clock timeout ceiling. | Allowlist mode. |
 | Resource | Quota defaults from template; no windowed limits. | Explicit limits. |
 
@@ -163,17 +207,17 @@ Each phase is independently valuable and shippable.
 | Phase | Scope |
 | --- | --- |
 | **0** | This proposal set reviewed in a tracking issue; open questions triaged into decisions. |
-| **1** | `SandboxPolicy` API model; legacy-field normalization; `policy.network` end-to-end; conflict detection; SDK `policy=`. |
+| **1** | `SandboxPolicy` API model; legacy-field normalization; `policy.network` end-to-end; conflict detection; effective-policy versioning and snapshots (§4.1); SDK `policy=`. |
 | **2** | Resource: quota merge, windowed limits (`minute`–`month` + `lifetime`), `onExceeded` actions (`warn`/`pause`/`hold`/`kill`), notifications and webhook, hold approval API, usage exposure. |
 | **3** | Filesystem: baseline sensitive-path protection, `readOnlyPaths` / `denyPaths` / `writableRoots`, host-mount policy surface. |
 | **4** | Exec: modes, user restriction, timeout ceiling, concurrency, audit, typed denials. |
-| **5** | Policy Profiles (`/policies`), `policyID` binding, hot updates where supported, LLM token accounting. |
+| **5** | Policy Profiles (`/policies`), profile revisions, `policyID` binding, hot updates where supported, LLM token accounting. |
 
 ## 11. Cross-cutting open questions
 
 1. **Profile scope.** Cluster-global, per-namespace, or per-template? Who may create profiles?
-2. **Hot updates.** Which modules support `PATCH /sandboxes/{id}/policy` at runtime, and what are the semantics for already-running processes and connections?
-3. **Audit unification.** Should denials across all modules share one event schema and sink, so operators get a single audit stream?
+2. **Hot updates.** Which modules support `PATCH /sandboxes/{id}/policy` at runtime, and what are the semantics for already-running processes and connections? Identity, versioning and snapshot semantics are settled (§4.1); what remains open is per-module runtime re-application.
+3. **Audit unification.** Should denials across all modules share one event schema and sink, so operators get a single audit stream? (Whatever the answer, every denial event carries `effectivePolicyVersion` per §4.1.6.)
 4. **Baseline levels.** Single default vs graded levels (`baseline` / `restricted` / `unrestricted`) shared by all modules?
 5. **Snapshot interaction.** When a sandbox is cloned or restored from a snapshot, which parts of the effective policy and of the accumulated usage travel with it?
 

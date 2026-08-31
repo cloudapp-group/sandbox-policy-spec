@@ -95,13 +95,22 @@ The design is guided by six principles:
 
 ---
 
+## Language and source of truth
+
+The English documents under `specs/0001-sandbox-security-policy/en/` are **the normative text**. The `zh/` set is a translation, maintained on a best-effort basis and therefore liable to lag behind. Where the two disagree, English wins.
+
+This is a deliberate choice: two independently authoritative copies of a normative document drift, and a drifted normative document is worse than an untranslated one. Readers implementing the spec should work from `en/`; `zh/` exists to lower the cost of reading and reviewing it.
+
+---
+
 ## Contributing
 
 This proposal is in **Draft** status and under community discussion. Contributions are welcome:
 
 1. Open or comment on the tracking issue.
 2. Propose changes via pull request; please keep one logical change per PR.
-3. Update both the English and Chinese versions when modifying normative text.
+3. Normative changes MUST land in `en/`. Updating `zh/` in the same PR is preferred; if you cannot, say so in the PR description so the gap is visible rather than silent.
+4. A PR that changes only `zh/` is a translation fix and MUST NOT change meaning. If it does, it belongs in `en/` first.
 
 When picking up a section, add yourself to the **Authors** field in `overview.md`.
 
