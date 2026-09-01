@@ -11,7 +11,9 @@ This spec defines the filesystem sub-policy of the `SandboxPolicy` object. The s
 1. **Host boundary** — which host paths may be mounted into the sandbox, and with what default writability. This formalizes the existing host-mount prefix allowlist as part of the user-facing policy.
 2. **Sandbox boundary** — which paths *inside* the sandbox may be read, written, or executed, applied to every process the sandbox runs.
 
-Out of scope: content inspection, quotas on file count/size (covered by resource limits for bytes written), and image-layer construction.
+Out of scope: content inspection, quotas on file count/size (covered by resource limits for bytes written), and image-layer construction. Also out of scope: detecting anomalous file access, which is an audit-stream concern rather than a policy field ([overview.md](./overview.md) §2.3.1).
+
+Two adjacent surfaces belong to [process.md](./process.md) and are named here because policies that need one usually need the other. Whether a process may *gain privilege* is `process.noNewPrivileges`, not a path rule — a `setuid` binary under a readable path is still a privilege gain. Whether a process may *persist* is only partly `process.allowDaemonize`: autostart persistence is written to files (`crontab`, systemd units, shell profiles, XDG autostart), so blocking it is a `denyPaths`/`readOnlyPaths` decision made here ([process.md](./process.md) §3.4).
 
 ## 2. Object model
 
@@ -158,6 +160,20 @@ Therefore, when `writableRoots` is non-empty, these paths are **implicitly writa
 2. `implicitRuntimeWritable: false` removes the implicit set, for a policy that genuinely wants one writable root. Such a policy SHOULD list whichever temporary directories its image needs in `writableRoots`.
 3. Enforcement MUST NOT consult `TMPDIR` or any other environment variable to discover a temporary directory: §4.3.2 forbids it, and an environment variable is workload-controlled. A deployment whose images point `TMPDIR` outside the implicit set MUST add that path to `writableRoots` explicitly; the platform SHOULD emit a `policyWarnings` entry `{reason: "tmpdir_outside_writable_roots"}` at create time where it can detect the mismatch from template configuration.
 
+### 6.5 Tier defaults
+
+Which defaults apply is selected by `policy.tier` ([overview.md](./overview.md) §7.1):
+
+| | `tier: baseline` (default) | `tier: restricted` |
+| --- | --- | --- |
+| `mode` | `baseline` | `baseline` |
+| `baselineVersion` | platform default | platform default |
+| `mounts.defaultReadOnly` | `false` | `true` |
+
+Note that `baseline` and `restricted` share `mode: baseline`. That is deliberate and is one of only two places in the proposal where a module's `baseline` tier is not byte-for-byte today's behavior ([overview.md](./overview.md) §9): the sensitive-path deny set is on at the default tier, because a credential path a legitimate workload never reads is not a compatibility surface worth preserving. A deployment that disagrees pins `baselineExceptions` or sets `mode: unrestricted`, both of which are recorded and audited (§6.3.4).
+
+`tier: restricted` changes one field: mounts arrive read-only unless the mount request asks for write. It does not narrow the in-sandbox path rules, because there is no useful guess to make — a restricted tier that turned on `writableRoots` would have to invent the root, and inventing `/workspace` for an image that builds in `/src` is the confusing-build-failure outcome §6.4 exists to avoid.
+
 ## 7. Merge semantics
 
 On top of [overview.md](./overview.md) §5:
@@ -173,9 +189,24 @@ On top of [overview.md](./overview.md) §5:
 | `mounts.allowedHostPrefixes` | Intersection across sources (mount surface can only narrow, never widen). |
 | `mounts.defaultReadOnly` | `true` wins (most restrictive). |
 
+### 7.1 Grantable fields
+
+Per [overview.md](./overview.md) §5.1.8, a time-bounded grant against this module may open:
+
+| Grantable | Not grantable |
+| --- | --- |
+| `baselineExceptions` — named baseline paths | `mode: unrestricted` |
+| `writableRoots` — named roots | `denyPaths` removal of any entry |
+| `readOnlyPaths` — removal of a named entry | `implicitRuntimeWritable` |
+| | `mounts.allowedHostPrefixes` |
+
+Two exclusions carry the weight. `denyPaths` is not grantable because an explicit deny is the one statement in this module whose author meant it literally; `baselineExceptions` already covers "one built-in path, temporarily", and it covers it with the audit trail of §6.3.4. `mounts.allowedHostPrefixes` is not grantable because the host boundary is bounded by operator configuration (§4.4.4), so a grant could not widen it in the first place — saying so is cheaper than letting someone discover it by trying.
+
+A grant of `writableRoots` when `writableRoots` was empty is a **narrowing**, not a widening: it switches the module from "writes allowed by default" to "writes allowed only here". A grant MUST NOT have that effect ([overview.md](./overview.md) §5.1.4 — a grant opens a hole of known shape, it does not change the shape of the policy). Such a request MUST be rejected with `400 POLICY_GRANT_INVALID`.
+
 ## 8. Errors
 
-Configuration errors (create/update time): `400 INVALID_POLICY` (malformed pattern, mutual exclusion violated, unknown `baselineVersion`, `baselineExceptions` entry not present in the pinned baseline set), `400 POLICY_FS_MOUNT_FORBIDDEN` (host path outside allowlist).
+Configuration errors (create/update time): `400 INVALID_POLICY` (malformed pattern, mutual exclusion violated, unknown `baselineVersion`, `baselineExceptions` entry not present in the pinned baseline set), `400 POLICY_FS_MOUNT_FORBIDDEN` (host path outside allowlist), `400 POLICY_GRANT_INVALID` (a grant targeting a non-grantable field, or a `writableRoots` grant against an empty `writableRoots`, §7.1).
 
 Enforcement errors are OS-level, not API-level, because the policy applies below the API surface:
 
@@ -200,8 +231,11 @@ Denials MUST NOT be distinguishable from ordinary permission failures in a way t
 2. **Default-version rollout.** §6.2.4 requires an announced deprecation window before the default baseline version moves. How long is it, and through which channel is it announced?
 3. **Exec bit.** Should the spec distinguish execute permission from read? v1 ties execution to network/exec policy instead; confirm.
 4. **Image-level declarations.** `baselineExceptions` is per-policy. If a future baseline version denies a path that a specific *image* legitimately needs, is a per-policy exception enough, or does the image need to declare it once so every policy using that image inherits it?
+5. **Temporary-data cleanup at task end.** Nothing here states what happens to data a task wrote once the task is over. The implicit runtime-writable set (§6.4) and any `writableRoots` persist for the sandbox's lifetime, so a sandbox reused across tasks carries one task's scratch files, caches, and downloaded artifacts into the next. Is that a policy field (e.g. paths to wipe at task boundaries), a lifecycle operation outside this module, or deliberately the caller's job? The prior question is whether the platform even has a notion of a "task boundary" distinct from the sandbox lifetime — [overview.md](./overview.md) §11.8 tracks that, and this question cannot be answered before it.
+6. **Snapshot and restore.** §4.2 governs access by processes inside the sandbox. A snapshot reads the filesystem from *outside* it, and a restore writes one. Neither passes through the decision order, so today a `denyPaths` entry does not prevent its contents from leaving in a snapshot image. Does snapshot/restore need its own declared permission — and if the answer is that `denyPaths` should exclude paths from snapshots, that is a substantial change to what the field means and belongs in a version of this spec that says so explicitly.
+7. **Exec bit, revisited.** Question 3 defers execute permission to `exec` policy. With [process.md](./process.md) now specifying syscall-level enforcement, the alternative is clearer: deny-execute-by-path is a filesystem rule, while denying `execve` outright is a process rule, and neither is the `exec` control interface. Confirm that no-exec-by-path stays out of v1.
 
 ## 11. Non-normative notes
 
-- Each sandbox owns a whole kernel, so the requirements in §4.3 can be met by in-kernel, unprivileged, per-sandbox mechanisms (e.g. an LSM with per-process rule sets, or equivalent syscall-level enforcement). The spec intentionally mandates only the *properties*, not the mechanism.
+- Each sandbox owns a whole kernel, so the requirements in §4.3 can be met by in-kernel, unprivileged, per-sandbox mechanisms (e.g. an LSM with per-process rule sets, or equivalent syscall-level enforcement). The spec intentionally mandates only the *properties*, not the mechanism. [process.md](./process.md) §4.5 states the same requirements for the syscall surface, and the two are expected to be satisfiable by one mechanism.
 - The host-boundary rules formalize existing behavior (prefix allowlist + read-only remount) without changing it.

@@ -8,7 +8,9 @@
 
 本规格定义 `SandboxPolicy` 对象的命令执行子策略：对**经沙箱控制接口发起**的命令执行（进程启动、代码运行、交互会话）的约束。
 
-它**不**约束沙箱负载运行后自行启动的进程；那是文件系统与资源模块的领地。这一边界在此明确写出，因为它是命令执行策略最主要的诚实局限，而 §3.6 量化了它的代价：对 Agent 生成的代码，一份放行了解释器的白名单几乎约束不了任何东西。各模块分别应对哪类威胁，见 [overview.md](./overview.md) §2.3 的纵深防御矩阵。
+它**不**约束沙箱负载运行后自行启动的进程；那是那些在控制接口之下强制执行的模块的领地 —— 提权、持久化与系统调用归 [process.md](./process.md)，路径归 [filesystem.md](./filesystem.md)，目标归 [network.md](./network.md)，消耗归 [resource.md](./resource.md)。这一边界在此明确写出，因为它是命令执行策略最主要的诚实局限，而 §3.6 量化了它的代价：对 Agent 生成的代码，一份放行了解释器的白名单几乎约束不了任何东西。各模块分别应对哪类威胁，见 [overview.md](./overview.md) §2.3 的纵深防御矩阵。
+
+有一项推论值得在此点名，因为读者最常在这里期待本模块做它做不到的事。「拦截高危系统命令」这个需求，本模块只能对*经 API 提交*的命令给出答案。一条针对 `insmod` 的拒绝条目，并不能阻止一个 Python 脚本去加载内核模块，而再精巧的模式语法也改变不了这一点 —— 真正做到这件事的是 [process.md](./process.md) §4.3，它拒绝 `init_module` 这个系统调用。在两者重叠的地方，两者都值得有：exec 规则在 API 处产生一条可读、可归因的拒绝，而 process 规则才是真正守得住的那一条。
 
 ## 2. 对象模型
 
@@ -99,7 +101,7 @@ v1 匹配的是**实际将被执行**的可执行文件，而不是调用时的�
 
 1. 在 `allowlist` 中放行任何 shell 或通用解释器 —— 直接放行、经包装器放行，或作为一个会外包 shell 的构建工具放行 —— 就使该白名单对解释器能做的一切而言**等同于不限制**。匹配看到的是解释器的调用，而不是它要跑的程序。
 2. 因此，当策略设为 `mode: allowlist` 且任何一条 `allowedCommands` 规则解析到已知的 shell 或通用解释器时，创建/更新响应**必须**包含 `policyWarnings` 条目 `{field, rule, reason: "interpreter_admitted"}`，记录该白名单并未约束那条规则可执行的范围。
-3. `exec` 是控制接口门禁，不是围堵边界。对解释器启动的一切的围堵，是 `filesystem`、`network` 与 `resource` 的责任 —— 见 [overview.md](./overview.md) §2.3。
+3. `exec` 是控制接口门禁，不是围堵边界。对解释器启动的一切的围堵，是 `process`、`filesystem`、`network` 与 `resource` 的责任 —— 见 [overview.md](./overview.md) §2.3。具体地说，`interpreter_admitted` 警告出现的那一刻，正是一个部署该去读 `process.syscall` 与 `filesystem.denyPaths` 的时刻，因为解释器启动之后仍然生效的就是它们。
 
 ## 4. 求值语义
 
@@ -167,6 +169,8 @@ exec:
 
 `unrestricted` + `maxTimeoutSec` 上限是 v1 刻意的默认值：它不改变*什么可以运行*，但为被遗忘的超时兜底。需要更强保证的模板**应该**随附 `mode: allowlist` 默认值。
 
+以上就是 `baseline` 分级（[overview.md](./overview.md) §7.1）。`tier: restricted` 在这里只改一个字段 —— `audit: metadata` —— 并刻意把 `mode` 留在 `unrestricted`。两条理由都已在别处写过，在此重复是因为它们缺席看起来会像疏漏：`allowlist` 要求 `allowedCommands` 非空（§5），所以一个选择 `allowlist` 的分级会让单独写 `tier: restricted` 直接校验失败；而按 §3.6，白名单本来也不是围堵一个已放行解释器的东西。想要命令白名单的部署自己声明它，因为只有那个部署知道自己的命令清单。分级在不猜的前提下能提供的是审计轨迹，所以它提供的就是审计轨迹。
+
 ## 7. 错误与可观测性
 
 结构化错误载荷（所有执行错误都携带，便于 Agent 自我纠正）：
@@ -177,6 +181,7 @@ exec:
 | `POLICY_EXEC_USER_DENIED` | `{user, allowedUsers}` | 用户不在 `allowedUsers`。 |
 | `POLICY_EXEC_CONCURRENCY_LIMIT` | `{maxConcurrent, running, retryAfterSec}` | 达到并发上限。 |
 | `POLICY_EXEC_UNPARSEABLE` | `{reason}` | 命令行歧义（§4.3.4）。`reason` 取值之一：`unbalanced_quotes`、`unknown_syntax`、`indeterminate_wrapper`（§3.4.4）、`unresolvable_alias`（§3.5.4）、`nesting_depth_exceeded`（§3.5.5）。 |
+| `POLICY_GRANT_INVALID`（400） | `{field, reason}` | 授权指向本模块的不可授权字段（§8.1）。 |
 | `INVALID_POLICY`（400） | `{field, reason}` | 配置时校验。 |
 
 非致命发现以 `policyWarnings` 数组随创建/更新响应返回；警告绝不改变请求的结果。已定义的警告：`interpreter_admitted`（§3.6.2）。
@@ -195,6 +200,23 @@ exec:
 | `maxTimeoutSec` | 最小值胜。 |
 | `maxConcurrent` | 两者均非零时取最小值。 |
 | `audit` | 最详尽者胜（`full` > `metadata` > `none`）。 |
+
+### 8.1 可授权字段
+
+依 [overview.md](./overview.md) §5.1.8，针对本模块的限时授权可以打开：
+
+| 可授权 | 不可授权 |
+| --- | --- |
+| `allowedCommands` —— 具名规则 | `mode` —— 任何方向都不放松 |
+| `deniedCommands` —— 移除某条具名规则 | `allowedUsers` —— 不得新增 |
+| `maxConcurrent` —— 更高的值 | `audit` —— 不得降低 |
+| | `maxTimeoutSec` —— 不得更高 |
+
+1. 对 `allowedCommands` 的授权在授权有效期内追加具名规则。每一条这样加入的规则都受 §3.6.2 约束：若它解析到 shell 或通用解释器，授权响应**必须**携带 `interpreter_admitted` 警告，因为一次放行 `bash` 的十分钟授权，就是一次放行一切的十分钟授权。
+2. `mode` 在两个方向上都不可授权。放松它 —— 从 `allowlist` 到 `denylist`，或从任一者到 `unrestricted` —— 是改变形状，而不是打开一个形状已知的洞（[overview.md](./overview.md) §5.1.4）。*收紧*它也不是授权，那是一次策略更新。
+3. `allowedUsers` 不可授权，因为用户身份是本模块中其他每一条规则的**主体**，而不是它授予访问权的对象。为十分钟放宽它，改变的是这份策略在说谁。
+4. `maxTimeoutSec` 不可授权，因为授权本身已经有 TTL，而一个被抬高到超出该 TTL 的超时上限，会活得比抬高它的那份授权更久。单条长时间运行的命令，该走策略更新。
+5. `maxConcurrent` 可授权，而且它是这里唯一一个临时抬高既讲得通又无害的字段：一波并行工作无论如何都受 `resource` 约束。
 
 ## 9. 验收标准
 
@@ -227,11 +249,14 @@ exec:
 10. **包装器提取。** 在针对 `curl` 的 denylist 下，`env FOO=1 curl x` 被拒；在未列出 `sh` 的 allowlist 下，`sudo sh` 被拒；目标无法确定的包装器以 `indeterminate_wrapper` 被拒。
 11. **解释器诚实性。** 规则放行了 shell 或通用解释器的 `allowlist` 在创建时产生 `interpreter_admitted` 警告，且请求仍然成功。
 12. `allowedUsers` 跨来源合并后为交集，请求无法添加模板未允许的用户。
+13. **受限分级。** `tier: restricted` 且不带任何 exec 字段，解析为 `mode: unrestricted` 加 `audit: metadata`，且生效策略记录这些展开值。单独的 `tier: restricted` 校验通过 —— 它**不得**要求一份 `allowedCommands` 清单。
+14. **授权。** 一次追加具名 `allowedCommands` 规则的授权，在授权到期前放行该命令、到期后不再放行；指名 `mode`、`allowedUsers` 或更高 `maxTimeoutSec` 的授权被 `400 POLICY_GRANT_INVALID` 拒绝。规则解析到 shell 的授权携带 `interpreter_admitted` 警告。
 
 ## 10. 开放问题
 
 1. **按规则约束环境变量。** `VAR=x cmd` 现已被分解（§3.4.3），因此被包装的命令不能再躲在赋值后面。待定的是 `CommandRule` 是否应*约束*环境 —— 例如对网络相关命令禁止覆盖 `HTTP_PROXY`。v1 不限制环境变量的取值。
 2. **工作目录/按路径的规则。** 规则是否应支持按 `cwd` 限定（如「仅允许在 `/workspace` 下执行 `cargo build`」）？
 3. **交互会话。** 交互会话是逐次击键求值，还是建立会话时一次求值、其余交给文件系统/资源模块？v1：会话建立时一次求值；重新求值为开放问题。
-4. **默认拒绝列表。** `unrestricted` 默认是否也应像文件系统那样附带一个小的内置拒绝列表（如篡改 host-key）？这是「策略 vs 惊讶」的权衡。
-5. **包装器集合的演进。** §3.4.2 的包装器集合在 v1 是固定的。它与文件系统基线集合有同样的演进问题，且**应该**采用同一答案：用带版本的集合而非静默扩展（[filesystem.md](./filesystem.md) §6.2）。
+4. **默认拒绝列表。** `unrestricted` 默认是否也应像文件系统那样附带一个小的内置拒绝列表？人们常提的候选 —— `insmod`、`modprobe`、`mount`、篡改 host-key —— 大多在下一层能得到更好的答案：[process.md](./process.md) §4.3 在其基线里拒绝了 `init_module` 及其同类，无论命令怎么拼写、甚至无论它是否经过 API，那条都守得住。一份内置的 exec 拒绝列表能额外带来的，是在 API 边界上、对确实经由 API 抵达的那部分尝试给出一条*可读、可归因*的拒绝，这有真实的运维价值，也有真实的惊讶成本。这个权衡现在比过去更窄了，而回答它要求先决定：一条已被系统调用规则覆盖的 API 拒绝，值不值得那份惊讶。
+5. **包装器集合的演进。** §3.4.2 的包装器集合在 v1 是固定的。它与文件系统基线集合有同样的演进问题，且**应该**采用同一答案：用带版本的集合而非静默扩展（[filesystem.md](./filesystem.md) §6.2）。注意 [process.md](./process.md) §4.3 已经为其系统调用集合承诺了版本化，因此 v1 交付的是两个带版本的集合与一个不带版本的集合 —— 这处不对称，正是应当把这个问题关掉而不是继续拖着的理由。
+6. **会话重新求值与授权。** 上面的问题 3 让交互会话只在建立时求值一次。因此一次在会话进行中到期的授权（§8.1），并不会重新关上该会话的命令面；而同一次授权若是针对 `network` 或 `process`，则会重新关上，因为那些模块是按每次操作强制的。要么会话获得重新求值能力，要么就把这处不对称记录为会话级 exec 策略的一项已知局限。

@@ -8,7 +8,9 @@ Part of [Proposal 0001 — Sandbox Security Policy](./overview.md). The key word
 
 This spec defines the exec sub-policy of the `SandboxPolicy` object: constraints on command execution **initiated through the sandbox control interface** (process start, code run, interactive sessions).
 
-It does **not** constrain processes the sandbox workload starts on its own once running; that is the filesystem and resource modules' territory. This boundary is stated explicitly because it is the main honest limitation of exec policy, and §3.6 quantifies what it costs: for agent-generated code, an allowlist that admits an interpreter bounds almost nothing. See the defense-in-depth matrix in [overview.md](./overview.md) §2.3 for which module answers which threat.
+It does **not** constrain processes the sandbox workload starts on its own once running; that is the territory of the modules that enforce below the control interface — [process.md](./process.md) for privilege gain, persistence, and system calls, [filesystem.md](./filesystem.md) for paths, [network.md](./network.md) for destinations, and [resource.md](./resource.md) for consumption. This boundary is stated explicitly because it is the main honest limitation of exec policy, and §3.6 quantifies what it costs: for agent-generated code, an allowlist that admits an interpreter bounds almost nothing. See the defense-in-depth matrix in [overview.md](./overview.md) §2.3 for which module answers which threat.
+
+One consequence is worth naming here, because it is where readers most often expect this module to do something it cannot. "Block dangerous system commands" is a requirement this module can only answer for commands *submitted through the API*. A denylist entry for `insmod` does not stop a Python script from loading a kernel module, and no amount of pattern grammar will change that — [process.md](./process.md) §4.3 does, by denying the `init_module` system call. Where the two overlap, both are worth having: the exec rule produces a legible, attributable denial at the API, and the process rule is the one that actually holds.
 
 ## 2. Object model
 
@@ -99,7 +101,7 @@ Several standard commands exist in order to run *another* command. Matching only
 
 1. Admitting any shell or general-purpose interpreter in an `allowlist` — directly, through a wrapper, or as a build tool that shells out — makes that allowlist **effectively unrestricted** for everything the interpreter can do. Matching sees the interpreter invocation, not the program it runs.
 2. Therefore, when a policy sets `mode: allowlist` and any `allowedCommands` rule resolves to a known shell or general-purpose interpreter, the create/update response MUST include a `policyWarnings` entry `{field, rule, reason: "interpreter_admitted"}` recording that the allowlist does not bound what that rule may execute.
-3. `exec` is a control-interface gate, not a containment boundary. Containment for whatever an interpreter starts is the job of `filesystem`, `network`, and `resource` — see [overview.md](./overview.md) §2.3.
+3. `exec` is a control-interface gate, not a containment boundary. Containment for whatever an interpreter starts is the job of `process`, `filesystem`, `network`, and `resource` — see [overview.md](./overview.md) §2.3. Concretely, the `interpreter_admitted` warning is the point at which a deployment should be reading `process.syscall` and `filesystem.denyPaths`, because those are what still apply after the interpreter starts.
 
 ## 4. Evaluation semantics
 
@@ -167,6 +169,8 @@ exec:
 
 `unrestricted` + `maxTimeoutSec` ceiling is the deliberate v1 default: it changes nothing about *what* may run, but bounds the damage of a forgotten timeout. Templates that need stronger guarantees SHOULD ship `mode: allowlist` defaults.
 
+The above is the `baseline` tier ([overview.md](./overview.md) §7.1). `tier: restricted` changes exactly one field here — `audit: metadata` — and deliberately leaves `mode` at `unrestricted`. Two reasons, both already stated elsewhere and repeated because their absence would look like an oversight: `allowlist` requires a non-empty `allowedCommands` (§5), so a tier selecting it would make `tier: restricted` alone fail validation; and per §3.6 an allowlist is not what contains an admitted interpreter anyway. A deployment that wants a command allowlist declares it, because only that deployment knows its command list. What the tier can supply without guessing is the audit trail, so that is what it supplies.
+
 ## 7. Errors and observability
 
 Structured error payloads (all enforcement errors carry them so agents can self-correct):
@@ -177,6 +181,7 @@ Structured error payloads (all enforcement errors carry them so agents can self-
 | `POLICY_EXEC_USER_DENIED` | `{user, allowedUsers}` | User not in `allowedUsers`. |
 | `POLICY_EXEC_CONCURRENCY_LIMIT` | `{maxConcurrent, running, retryAfterSec}` | Concurrency cap reached. |
 | `POLICY_EXEC_UNPARSEABLE` | `{reason}` | Ambiguous command line (§4.3.4). `reason` is one of `unbalanced_quotes`, `unknown_syntax`, `indeterminate_wrapper` (§3.4.4), `unresolvable_alias` (§3.5.4), `nesting_depth_exceeded` (§3.5.5). |
+| `POLICY_GRANT_INVALID` (400) | `{field, reason}` | A grant targeting a non-grantable field of this module (§8.1). |
 | `INVALID_POLICY` (400) | `{field, reason}` | Configuration-time validation. |
 
 Non-fatal findings are returned in a `policyWarnings` array on the create/update response; a warning never changes the outcome of the request. Defined warning: `interpreter_admitted` (§3.6.2).
@@ -195,6 +200,23 @@ On top of [overview.md](./overview.md) §5:
 | `maxTimeoutSec` | Minimum wins. |
 | `maxConcurrent` | When both non-zero: minimum wins. |
 | `audit` | Most verbose wins (`full` > `metadata` > `none`). |
+
+### 8.1 Grantable fields
+
+Per [overview.md](./overview.md) §5.1.8, a time-bounded grant against this module may open:
+
+| Grantable | Not grantable |
+| --- | --- |
+| `allowedCommands` — named rules | `mode` — no relaxation in any direction |
+| `deniedCommands` — removal of a named rule | `allowedUsers` — no additions |
+| `maxConcurrent` — a higher value | `audit` — no reduction |
+| | `maxTimeoutSec` — no higher value |
+
+1. A grant of `allowedCommands` adds named rules for the duration of the grant. Every rule so added is subject to §3.6.2: if it resolves to a shell or general-purpose interpreter, the grant response MUST carry the `interpreter_admitted` warning, because a ten-minute grant admitting `bash` is a ten-minute grant admitting everything.
+2. `mode` is not grantable in either direction. Relaxing it — `allowlist` to `denylist`, or either to `unrestricted` — is a change of shape rather than a hole of known shape ([overview.md](./overview.md) §5.1.4). *Tightening* it is not a grant either; that is a policy update.
+3. `allowedUsers` is not grantable because a user identity is the subject of every other rule in this module, not an object it grants access to. Widening it for ten minutes changes who the policy is about.
+4. `maxTimeoutSec` is not grantable because a grant already has a TTL, and a timeout ceiling raised beyond that TTL would outlive the authorization that raised it. A single long-running command asks for a policy update.
+5. `maxConcurrent` is grantable, and is the one field here where a temporary raise is both plausible and harmless: a burst of parallel work is bounded by `resource` regardless.
 
 ## 9. Acceptance criteria
 
@@ -227,11 +249,14 @@ On top of [overview.md](./overview.md) §5:
 10. **Wrapper extraction.** `env FOO=1 curl x` is denied under a denylist for `curl`; `sudo sh` is denied under an allowlist that does not list `sh`; a wrapper with an indeterminate target is rejected as `indeterminate_wrapper`.
 11. **Interpreter honesty.** An `allowlist` whose rules admit a shell or general-purpose interpreter produces the `interpreter_admitted` warning on create, and the request still succeeds.
 12. `allowedUsers` merged across sources is the intersection, and a request cannot add a user the template did not allow.
+13. **Restricted tier.** `tier: restricted` with no exec fields resolves to `mode: unrestricted` with `audit: metadata`, and the effective policy records those expanded values. `tier: restricted` alone validates successfully — it MUST NOT require an `allowedCommands` list.
+14. **Grants.** A grant adding a named `allowedCommands` rule admits that command until the grant expires and not after; a grant naming `mode`, `allowedUsers`, or a higher `maxTimeoutSec` is rejected with `400 POLICY_GRANT_INVALID`. A grant whose rule resolves to a shell carries the `interpreter_admitted` warning.
 
 ## 10. Open questions
 
 1. **Env vars per rule.** `VAR=x cmd` is now decomposed (§3.4.3), so the wrapped command can no longer hide behind an assignment. What remains open is whether `CommandRule` should *constrain* the environment — e.g. forbid `HTTP_PROXY` overrides for network-relevant commands. v1 does not restrict environment values.
 2. **Working directory / path-based rules.** Should rules be able to scope by `cwd` (e.g. "allow `cargo build` only under `/workspace`")?
 3. **Sessions.** Do interactive sessions get per-keystroke evaluation, or is the session established under one evaluation and filesystem/resource left to police it? v1: one evaluation at session start; re-evaluation is an open question.
-4. **Default denylist.** Should the `unrestricted` default still ship a small built-in denylist (e.g. host-key tampering) the way filesystem ships a baseline? This is a policy-vs-surprise trade-off.
-5. **Wrapper set evolution.** The §3.4.2 wrapper set is fixed in v1. It has the same evolution problem as the filesystem baseline set, and SHOULD adopt the same answer: versioned sets rather than silent extension ([filesystem.md](./filesystem.md) §6.2).
+4. **Default denylist.** Should the `unrestricted` default still ship a small built-in denylist the way filesystem ships a baseline? The candidates people ask for — `insmod`, `modprobe`, `mount`, host-key tampering — are mostly better answered one layer down: [process.md](./process.md) §4.3 denies `init_module` and friends in its baseline, which holds no matter how the command was spelled or whether it came through the API at all. What a built-in exec denylist would add is a *legible, attributable* denial at the API boundary for the subset of attempts that do arrive through it, which has real operational value and a real surprise cost. The trade-off is now narrower than it was, and answering it requires deciding whether an API denial that a syscall rule already covers is worth the surprise.
+5. **Wrapper set evolution.** The §3.4.2 wrapper set is fixed in v1. It has the same evolution problem as the filesystem baseline set, and SHOULD adopt the same answer: versioned sets rather than silent extension ([filesystem.md](./filesystem.md) §6.2). Note that [process.md](./process.md) §4.3 already commits to versioning for its syscall set, so v1 ships two versioned sets and one unversioned one — that asymmetry is the argument for closing this question rather than carrying it.
+6. **Session re-evaluation and grants.** Question 3 above leaves interactive sessions evaluated once, at session start. A grant (§8.1) that expires mid-session therefore does not re-close the session's command surface, while the same grant against `network` or `process` does re-close, because those enforce per operation. Either sessions gain re-evaluation or this asymmetry is documented as a known limit of session-scoped exec policy.

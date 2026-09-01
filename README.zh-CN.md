@@ -5,7 +5,7 @@
 
 本仓库包含 **提案 0001：Sandbox Security Policy** —— 一个面向沙箱执行环境的声明式、可复用、默认安全的策略框架。
 
-沙箱不仅仅是网络端点。它运行的是部分可信、由 Agent 生成的代码，因此其能力边界必须在一个统一的对象中覆盖 **网络、文件系统、执行和资源** 消耗。
+沙箱不仅仅是网络端点。它运行的是部分可信、由 Agent 生成的代码，因此其能力边界必须在一个统一的对象中覆盖 **网络、文件系统、执行、进程行为和资源** 消耗。
 
 ---
 
@@ -18,9 +18,10 @@
 | **Network** | L3/L4/L7 出站允许/拒绝、入站门控、DNS 学习、公共流量控制 |
 | **Filesystem** | 宿主机挂载边界与沙箱内路径访问策略（`denyPaths`、`readOnlyPaths`、`writableRoots`） |
 | **Exec** | 命令白名单/黑名单、用户限制、超时上限、并发限制、审计 |
-| **Resource** | CPU/内存配额、窗口化限制（分钟–月 + 生命周期）、LLM Token 计量、超限处置 |
+| **Process** | 已运行进程的提权、持久化与系统调用策略 |
+| **Resource** | CPU/内存配额、带宽上限、窗口化限制（分钟–月 + 生命周期）、LLM Token 计量、超限处置 |
 
-规范以五文档集合的形式组织在 `specs/0001-sandbox-security-policy/` 目录下。
+规范以六文档集合的形式组织在 `specs/0001-sandbox-security-policy/` 目录下。
 
 ---
 
@@ -33,26 +34,27 @@
 - **可复用** —— 一个安全组可绑定多个实例，变更会传播到所有实例。
 - **统一性** —— 一套语法、一种评估顺序、一条审计链路。
 
-沙箱恰恰需要这些特性，并且要将它们扩展到执行域。与 ECS 实例不同，沙箱运行的是**由 Agent 生成的、部分可信的代码**。其爆炸半径更广：数据外泄、凭据窃取、宿主机挂载滥用、失控循环以及 LLM Token 浪费。
+沙箱恰恰需要这些特性，并且要将它们扩展到执行域。与 ECS 实例不同，沙箱运行的是**由 Agent 生成的、部分可信的代码**。其爆炸半径更广：数据外泄、凭据窃取、宿主机挂载滥用、提权、失控循环以及 LLM Token 浪费。
 
 | ECS 实例 | 沙箱 |
 | --- | --- |
 | 运行人工编写、可信的工作负载 | 运行 Agent 生成、部分可信的代码 |
-| 边界 = 网络可达性 | 边界 = 网络 **+ 文件系统 + 执行 + 资源** |
-| 爆炸半径：数据外泄 | 爆炸半径：外泄 **+ 凭据窃取、宿主机挂载滥用、失控循环、Token 浪费** |
+| 边界 = 网络可达性 | 边界 = 网络 **+ 文件系统 + 执行 + 进程 + 资源** |
+| 爆炸半径：数据外泄 | 爆炸半径：外泄 **+ 凭据窃取、宿主机挂载滥用、提权、失控循环、Token 浪费** |
 
 ### 当前的缺口
 
-四个能力域目前的成熟度差异很大：
+五个能力域目前的成熟度差异很大：
 
 | 模块 | 当前已有能力 | 缺口 |
 | --- | --- | --- |
 | **Network** | 出站允许/拒绝、域名白名单、L7 规则、入站门控 | 字段分散；没有可复用的策略对象；没有统一的合并语义 |
 | **Filesystem** | 宿主机挂载前缀白名单与每个挂载的 `readOnly` | 缺少对沙箱内敏感路径的保护；缺少路径级只读/拒绝策略 |
 | **Exec** | 每次请求单独设置 `timeout`、`user`、`cwd` | 缺少沙箱级命令策略、用户限制、并发上限和审计 |
-| **Resource** | CPU/内存稳态配额；空闲超时 | 缺少窗口化限制、生命周期预算、LLM Token 计量和超限处置 |
+| **Process** | 无任何面向用户的能力 | 提权、持久化与系统调用暴露面完全没有策略表达 |
+| **Resource** | CPU/内存稳态配额；空闲超时 | 缺少窗口化限制、生命周期预算、带宽上限、LLM Token 计量和超限处置 |
 
-如果没有单一策略对象，每个模块都会长出各自的配置风格、合并规则、默认值和审计格式。用户必须同时理解四个半成品系统；模板作者无法在一个地方表达"该模板的沙箱已被锁定"；未来的新模块还会引入第五、第六种方言。
+如果没有单一策略对象，每个模块都会长出各自的配置风格、合并规则、默认值和审计格式。用户必须同时理解五个半成品系统；模板作者无法在一个地方表达"该模板的沙箱已被锁定"；未来的新模块还会引入第六、第七种方言。
 
 ### 为什么需要统一策略？
 
@@ -80,16 +82,18 @@
 .
 └── specs/0001-sandbox-security-policy/
     ├── en/
-    │   ├── overview.md      # Shared model, merge semantics, principles, compatibility
+    │   ├── overview.md      # Shared model, merge semantics, principles, tiers, grants, compatibility
     │   ├── network.md       # Network sub-policy
     │   ├── filesystem.md    # Filesystem sub-policy
     │   ├── exec.md          # Command execution sub-policy
+    │   ├── process.md       # Privilege, persistence, and system-call sub-policy
     │   └── resource.md      # Resource limits, governance, and LLM token accounting
     └── zh/
-        ├── overview.md      # 共享模型、合并语义、原则、兼容性
+        ├── overview.md      # 共享模型、合并语义、原则、分级、限时授权、兼容性
         ├── network.md       # 网络子策略
         ├── filesystem.md    # 文件系统子策略
         ├── exec.md          # 命令执行子策略
+        ├── process.md       # 提权、持久化与系统调用子策略
         └── resource.md      # 资源限制、治理与 LLM Token 计量
 ```
 

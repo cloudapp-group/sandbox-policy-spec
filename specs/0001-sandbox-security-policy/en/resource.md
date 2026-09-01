@@ -8,11 +8,13 @@ Part of [Proposal 0001 — Sandbox Security Policy](./overview.md). The key word
 
 This spec defines the `resource` sub-policy of the `SandboxPolicy` object. The module is named **resource** because that is exactly what it governs: what a sandbox may consume. It covers three contracts:
 
-- **Quota** — steady-state *rate*: how much the sandbox may use at any instant (CPU, memory).
+- **Quota** — steady-state *rate*: how much the sandbox may use at any instant (CPU, memory, network bandwidth).
 - **Limits** — windowed *amounts*: how much the sandbox may consume per `minute`, `hour`, `day`, `week`, or `month` window, or over its whole `lifetime` (CPU-seconds, egress bytes, disk-write bytes, LLM tokens).
 - **Governance** — what happens when a limit is exceeded: warn, pause, terminate, or **hold for human intervention**, plus notifications so a human learns about it in time.
 
 Rate throttling and runaway-agent protection are both amount problems with different time constants — that is why limits are windowed rather than a single lifetime number.
+
+The rate/amount split is also the seam between this module and `network`: `network` decides *what may be reached*, `resource` decides *how much may flow*. A bandwidth ceiling is consumption, so it is a quota here rather than a field on an egress rule ([overview.md](./overview.md) §11.9).
 
 Out of scope: billing and pricing (the usage exposure below is the contract billing builds on); idle timeouts and lifecycle (existing behavior, unchanged — except that it remains applicable to held sandboxes, §7).
 
@@ -22,8 +24,9 @@ Out of scope: billing and pricing (the usage exposure below is the contract bill
 policy:
   resource:
     quota:
-      cpuMillicores:   int                  # steady-state CPU quota
-      memoryMiB:       int                  # steady-state memory quota
+      cpuMillicores:      int               # steady-state CPU quota
+      memoryMiB:          int               # steady-state memory quota
+      netBandwidthKbps:   int               # steady-state egress bandwidth ceiling
     limits:
       cpuSeconds:                          # vCPU-seconds
         windows:  {minute?, hour?, day?, week?, month?, lifetime?}
@@ -58,6 +61,7 @@ Dimensions: `cpuSeconds`, `netEgressBytes`, `diskWriteBytes`, and `llmTokens.{in
 | --- | --- | --- | --- | --- |
 | `quota.cpuMillicores` | `int?` | ≥ 0 | template value | Steady-state CPU quota (millicores). |
 | `quota.memoryMiB` | `int?` | ≥ 0 | template value | Steady-state memory quota (MiB). |
+| `quota.netBandwidthKbps` | `int?` | > 0 | template value; unset = unlimited | Steady-state egress bandwidth ceiling (kbit/s). Excess traffic is **shaped, not failed** (§3.1). |
 | `limits.<dimension>.windows` | `map?` | Keys from `{minute, hour, day, week, month, lifetime}`; values > 0. Multiple windows MAY be set and are enforced independently. | unset (no limit) | Maximum consumption of the dimension per window (§4). |
 | `limits.<dimension>.onExceeded` | `enum?` | `warn` \| `pause` \| `hold` \| `kill` | resource default | Action when any window of this dimension is exceeded. |
 | `onExceeded` | `enum?` | same | `hold` | Resource-wide default action. |
@@ -67,6 +71,16 @@ Dimensions: `cpuSeconds`, `netEgressBytes`, `diskWriteBytes`, and `llmTokens.{in
 Zero/negative limits, empty `windows` maps, and thresholds outside (0, 1] MUST be rejected with `400 INVALID_POLICY`.
 
 `lifetime` is the never-resetting window: a limit for the sandbox's whole existence. The five periodic windows reset at their boundaries (§4.1).
+
+### 3.1 Bandwidth semantics
+
+`quota.netBandwidthKbps` is a rate ceiling, and rate ceilings behave unlike every other field in this spec: they do not have an exceedance transition, because they cannot be exceeded.
+
+1. Traffic above the ceiling MUST be **shaped** — queued and paced down to the ceiling — not rejected. There is no `onExceeded` action for bandwidth, no `resource.exhausted` event, and no held state. A sandbox at its bandwidth ceiling is a slow sandbox, not a failing one.
+2. The ceiling applies to **egress** from the sandbox's network interface(s), measured at the same point as the `netEgressBytes` dimension (§5.1), so a tenant reading both numbers is reading one traffic stream.
+3. Unset means unlimited: the sandbox is bounded only by the platform's own capacity. Zero MUST be rejected with `400 INVALID_POLICY` — a sandbox that may reach a destination (`network`) but may not send a byte to it is a configuration whose failure mode is indistinguishable from a broken network, which principle 4 exists to prevent. "Send nothing" is expressed in `network`, where the denial is explainable.
+4. Bandwidth and `limits.netEgressBytes` are complementary and MUST be enforceable together: the quota bounds the instantaneous rate, the limit bounds the accumulated amount. Shaping reduces the rate at which a `netEgressBytes` window fills; it never substitutes for it.
+5. Ingress shaping is not specified. Inbound traffic is not the sandbox's consumption to control, and a ceiling the workload cannot influence is not a policy field (§13.11).
 
 ## 4. Window semantics
 
@@ -153,6 +167,8 @@ Action resolution: `limits.<dimension>.onExceeded` if set, else the resource-wid
 
 The default is `hold`: configuring a limit is opting into governance, and hold is the only action that is both safe (consumption stops) and reversible (no data loss) while leaving the final say to a human. Deployments without an on-call workflow SHOULD set `warn` or `pause` explicitly — held sandboxes remain subject to the standard idle-timeout lifecycle, so an unattended hold cannot leak resources forever.
 
+`policy.tier` ([overview.md](./overview.md) §7.1) does not change anything in this module. Both `baseline` and `restricted` resolve to template quotas, no windowed limits, and `onExceeded: hold` — the last of which is already the default above. This is stated rather than omitted because a reader who sees four modules shift under `tier: restricted` is entitled to know that the fifth deliberately does not: consumption budgets are workload-specific numbers, and there is no value for `llmTokens.total` that is "the restricted one". A tier that guessed would be a tier that breaks workloads for a security posture it cannot actually improve.
+
 ## 7. Human intervention (hold)
 
 1. On a `hold` action the sandbox enters the **held** state: execution suspended (pause-equivalent), and a `resource.hold_requested` notification MUST be emitted immediately (independent of `notifications.thresholds`).
@@ -191,7 +207,7 @@ The default is `hold`: configuring a limit is opting into governance, and hold i
 
    ```json
    "resource": {
-     "quota": {"cpuMillicores": 2000, "memoryMiB": 2048},
+     "quota": {"cpuMillicores": 2000, "memoryMiB": 2048, "netBandwidthKbps": 51200},
      "usage": {
        "cpuSeconds": {
          "current": {"minute": 12.3, "hour": 300.5, "lifetime": 12345.6},
@@ -210,9 +226,10 @@ The default is `hold`: configuring a limit is opting into governance, and hold i
    ```
 
 2. `limits` reports the effective configured windows; `current` reports the in-window counters for the configured windows. Lifetime counters MUST be reported even when no lifetime limit is configured (billing needs them).
-3. For `llmTokens` dimensions, `provenance` reports the lifetime split of how the amounts were learned (§5.4). The three values MUST sum to the lifetime counter, so a tenant can see how much of a bill rests on estimates.
-4. `state.exhausted` lists the currently-exceeded (dimension, window) pairs; `state.held` is true while a hold is pending.
-5. The SDK exposes the same object as `sandbox.resource`.
+3. `quota.netBandwidthKbps` is reported when set and omitted when unlimited. It has no `usage` entry: a rate ceiling has no counter (§3.1). Accumulated egress is `usage.netEgressBytes`.
+4. For `llmTokens` dimensions, `provenance` reports the lifetime split of how the amounts were learned (§5.4). The three values MUST sum to the lifetime counter, so a tenant can see how much of a bill rests on estimates.
+5. `state.exhausted` lists the currently-exceeded (dimension, window) pairs; `state.held` is true while a hold is pending.
+6. The SDK exposes the same object as `sandbox.resource`.
 
 ## 10. Merge semantics
 
@@ -220,11 +237,22 @@ On top of [overview.md](./overview.md) §5:
 
 | Field | Merge refinement |
 | --- | --- |
-| `quota.*` | Explicit value overrides; absent keeps template value. |
+| `quota.cpuMillicores`, `quota.memoryMiB` | Explicit value overrides; absent keeps template value. |
+| `quota.netBandwidthKbps` | Minimum of the set values wins; a source that sets nothing keeps the lower-precedence value. A higher-precedence source cannot *raise* a ceiling set by a lower-precedence source, nor unset it. |
 | `limits.*.windows` | Per (dimension, window): minimum of set values wins; a dimension set by no source is unlimited. A higher-precedence source cannot *remove* a limit set by a lower-precedence source. |
 | `onExceeded` (default and per-dimension) | Most severe wins: `kill` > `hold` > `pause` > `warn`. |
 | `notifications.thresholds` | Union across sources, deduplicated, sorted ascending. |
 | `notifications.webhook` | Union across sources (additive observability). |
+
+`quota.cpuMillicores` and `quota.memoryMiB` keep override semantics because that is today's template behavior and changing it would break existing callers ([overview.md](./overview.md) §9). `netBandwidthKbps` is new, so it is narrow-only from the start — the shared merge principle applies wherever compatibility does not force otherwise.
+
+### 10.1 Grantable fields
+
+Per [overview.md](./overview.md) §5.1.8 every module declares its grantable surface. **This module has none.** No `resource` field may be widened by a time-bounded grant.
+
+Temporary additional consumption is already a first-class operation here, and it has a different shape from a grant: the approval API (§7.3) is driven by a **hold**, so a human decides at the moment the sandbox actually needs more, with the exceeded counters in front of them. A grant is a pre-authorization issued before the need is demonstrated. Adding grants to this module would give the same outcome two mechanisms, one of which discards the information the other is built on.
+
+> **Terminology.** The `grant` field of the approval API (§7.3) predates the time-bounded grants of [overview.md](./overview.md) §5.1 and is a different thing: an allowance added to a window counter, with no TTL of its own — it reverts at window rollover, or never, for `lifetime`. The collision is real and is recorded as an open question ([overview.md](./overview.md) §11.7).
 
 ## 11. Errors
 
@@ -251,6 +279,9 @@ On top of [overview.md](./overview.md) §5:
 12. **Late correction.** An authoritative `usage` arriving after an estimate applies a positive delta only; no counter ever decreases.
 13. **Provenance exposure.** The `response` / `estimated` / `reported` split is reported and sums to the lifetime counter.
 14. `report_usage` called with sandbox-scoped credentials is rejected.
+15. **Bandwidth shaping.** With `quota.netBandwidthKbps` set, a sustained transfer completes at approximately the configured rate; no connection is refused, no `resource.exhausted` event is emitted, and the sandbox is never paused, held, or killed by the ceiling. With the field unset, the same transfer is not rate-limited.
+16. **Bandwidth is not a limit.** A sandbox with both `quota.netBandwidthKbps` and a `limits.netEgressBytes` window still triggers that window's action when the accumulated amount is reached; shaping only delays when that happens. `netBandwidthKbps: 0` is rejected with `400 INVALID_POLICY`.
+17. **Bandwidth merge.** A request setting a higher `netBandwidthKbps` than the template's value resolves to the template's value; a lower value resolves to the request's.
 
 ## 13. Open questions
 
@@ -259,12 +290,16 @@ On top of [overview.md](./overview.md) §5:
 3. **Auto-resume.** Should `pause` auto-resume at rollover (proposed SHOULD) or require an explicit resume?
 4. **Webhook authentication.** HMAC signature scheme? Where are shared secrets stored?
 5. **Approval RBAC.** Which principals may approve: sandbox owner only, namespace operators, or anyone with cluster admin?
-6. **Grant visibility.** Should grants appear in `resource.usage` (e.g. an `allowance` field) so platforms can bill for approved overage?
+6. **Grant visibility.** Should grants appear in `resource.usage` (e.g. an `allowance` field) so platforms can bill for approved overage? Note the naming collision with the time-bounded grants of [overview.md](./overview.md) §5.1, tracked as §11.7 there — whichever name survives, this field and that mechanism must not share it.
 7. **Per-window actions.** Should `onExceeded` be settable per window rather than per dimension (e.g. `minute`→`pause`, `month`→`hold` on the same dimension)?
 8. **Counter inheritance on restore/clone.** Reset is proposed here; should inheritance be available as an operator choice?
 9. **Estimation method.** §5.3 fixes the *properties* of an estimate (lower bound, derived from observed content) but not the algorithm. Should the algorithm and its expected error be published, so tenants can audit the estimated portion of their usage?
 10. **Cached and reasoning tokens.** Providers increasingly meter cache reads and reasoning tokens separately. Do those become their own dimensions, or fold into `input` / `output`?
+11. **Ingress shaping.** §3.1.5 specifies egress only. Should an inbound ceiling exist for sandboxes that serve public traffic (`network.ingress`), and if so, is it a `resource` field at all, given that the sandbox does not choose how much arrives?
+12. **Disk and IOPS quotas.** `diskWriteBytes` bounds the amount written but nothing bounds the *rate*, and nothing bounds total footprint on disk. Are `quota.diskIops` and a size ceiling needed, or is the write-amount limit enough in practice?
+13. **Per-destination rate.** A bandwidth ceiling is per sandbox. Whether a rate can be attached to a single egress rule is the mirror of this question and is tracked in [network.md](./network.md) §10.5; it must be answered once, not twice.
 
 ## 14. Non-normative notes
 
 - Every dimension has a natural source in the sandbox's own kernel accounting (CPU time, block I/O, interface statistics) or in the outbound HTTP path (LLM `usage` fields); window counters derive from those streams. The spec fixes only the semantics above.
+- Bandwidth shaping is the one contract here that is enforced rather than metered: the platform paces the sandbox's egress instead of counting it. Because the mechanism sits on the same interface the `netEgressBytes` dimension is measured on, the two numbers stay consistent for free — which is the reason §3.1.2 fixes the measurement point rather than leaving it to the implementation.

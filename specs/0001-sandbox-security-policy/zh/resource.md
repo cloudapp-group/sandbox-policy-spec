@@ -8,11 +8,13 @@
 
 本规格定义 `SandboxPolicy` 对象的资源（`resource`）子策略。模块之所以命名为 **resource**，是因为它治理的正是"资源"：沙箱可以消耗什么。它包含三份契约：
 
-- **配额（quota）** — 稳态*速率*：沙箱在任意时刻*可以*用多少（CPU、内存）。
+- **配额（quota）** — 稳态*速率*：沙箱在任意时刻*可以*用多少（CPU、内存、网络带宽）。
 - **限额（limits）** — 按窗口的*总量*：沙箱在每个 `minute`、`hour`、`day`、`week`、`month` 窗口内，或整个 `lifetime`（生命周期）内，总共可以消耗多少（CPU 秒数、出站字节、磁盘写入字节、LLM Token）。
 - **治理（governance）** — 超限后会发生什么：警告、暂停、终止，或 **hold（挂起等待人工介入）**，以及让人及时知晓的通知（notification）机制。
 
 速率节流与失控 Agent 防御都是"总量"问题，只是时间常数不同 —— 这正是限额按窗口配置、而非单一生命周期数字的原因。
+
+速率与总量之分同时也是本模块与 `network` 的接缝：`network` 决定*什么可以被访问*，`resource` 决定*可以流过多少*。带宽上限是消耗，所以它是这里的一个配额，而不是出站规则上的一个字段（[overview.md](./overview.md) §11.9）。
 
 不在范围内：计费与定价（本规格的用量暴露是计费可依赖的契约）；空闲超时与生命周期（既有行为不变 —— 但对处于 held 状态的沙箱仍然适用，见 §7）。
 
@@ -22,8 +24,9 @@
 policy:
   resource:
     quota:
-      cpuMillicores:   int                  # 稳态 CPU 配额
-      memoryMiB:       int                  # 稳态内存配额
+      cpuMillicores:      int               # 稳态 CPU 配额
+      memoryMiB:          int               # 稳态内存配额
+      netBandwidthKbps:   int               # 稳态出站带宽上限
     limits:
       cpuSeconds:                          # vCPU 秒数
         windows:  {minute?, hour?, day?, week?, month?, lifetime?}
@@ -58,6 +61,7 @@ policy:
 | --- | --- | --- | --- | --- |
 | `quota.cpuMillicores` | `int?` | ≥ 0 | 模板值 | 稳态 CPU 配额（millicores）。 |
 | `quota.memoryMiB` | `int?` | ≥ 0 | 模板值 | 稳态内存配额（MiB）。 |
+| `quota.netBandwidthKbps` | `int?` | > 0 | 模板值；未设置 = 不限 | 稳态出站带宽上限（kbit/s）。超出上限的流量被**整形而非失败**（§3.1）。 |
 | `limits.<维度>.windows` | `map?` | 键取自 `{minute, hour, day, week, month, lifetime}`；值 > 0。可同时设置多个窗口，各自独立生效。 | 未设置（不限） | 该维度每窗口的最大消耗量（§4）。 |
 | `limits.<维度>.onExceeded` | `enum?` | `warn` \| `pause` \| `hold` \| `kill` | 资源级默认 | 该维度任一窗口超限时的动作。 |
 | `onExceeded` | `enum?` | 同上 | `hold` | 资源级默认动作。 |
@@ -67,6 +71,16 @@ policy:
 零/负限额、空 `windows` 映射、(0, 1] 之外的阈值**必须**以 `400 INVALID_POLICY` 拒绝。
 
 `lifetime` 是永不重置的窗口：针对沙箱整个存在期的限额。五个周期性窗口在其边界处重置（§4.1）。
+
+### 3.1 带宽语义
+
+`quota.netBandwidthKbps` 是一个速率上限，而速率上限的行为与本规格中其他每个字段都不同：它没有超限跃迁，因为它无法被超出。
+
+1. 超出上限的流量**必须**被**整形（shaped）** —— 排队并降速到上限 —— 而不是被拒绝。带宽没有 `onExceeded` 动作、没有 `resource.exhausted` 事件、也没有 held 状态。一个跑在带宽上限上的沙箱是一个慢的沙箱，不是一个出故障的沙箱。
+2. 上限作用于沙箱网络接口的**出站**方向，与 `netEgressBytes` 维度在同一个测量点上测量（§5.1），因此同时读这两个数字的租户读的是同一条流量。
+3. 未设置表示不限：沙箱只受平台自身容量约束。取值为零**必须**以 `400 INVALID_POLICY` 拒绝 —— 一个可以到达某目标（`network`）却一个字节都发不出去的沙箱，其失败模式与网络坏掉无法区分，而这正是原则 4 存在所要防止的。「什么都不许发」应当在 `network` 中表达，那里的拒绝是可解释的。
+4. 带宽与 `limits.netEgressBytes` 是互补的，且**必须**可以同时强制执行：配额约束瞬时速率，限额约束累计总量。整形只是降低 `netEgressBytes` 窗口被填满的速度；它绝不替代后者。
+5. 入站整形不在本规格范围内。入站流量不是沙箱所能控制的自身消耗，而一个工作负载无从影响的上限不是一个策略字段（§13.11）。
 
 ## 4. 窗口语义
 
@@ -153,6 +167,8 @@ policy:
 
 默认动作是 `hold`：配置限额即是选择接受治理，而 hold 是唯一既安全（消耗停止）又可逆（不丢数据）、同时把最终决定权交给人的动作。没有值守流程的部署**应该**显式设置为 `warn` 或 `pause` —— held 沙箱仍受标准空闲超时生命周期约束，无人处置的 hold 不会永久泄漏资源。
 
+`policy.tier`（[overview.md](./overview.md) §7.1）不改变本模块的任何东西。`baseline` 与 `restricted` 都解析为模板配额、无窗口限额、`onExceeded: hold` —— 而最后这一项本就是上面的默认值。这一点被写出来而不是省略，是因为一位读者看到四个模块都在 `tier: restricted` 之下发生位移时，有权知道第五个是刻意不动的：消耗预算是工作负载专属的数值，而 `llmTokens.total` 并不存在一个「受限的那个值」。一个会猜的分级，就是一个为了它其实无法改善的安全姿态而弄坏工作负载的分级。
+
 ## 7. 人工介入（hold）
 
 1. 触发 `hold` 动作时，沙箱进入 **held（待人工处置）** 状态：执行挂起（等效于 pause），并**必须**立即发出 `resource.hold_requested` 通知（不受 `notifications.thresholds` 约束）。
@@ -191,7 +207,7 @@ policy:
 
    ```json
    "resource": {
-     "quota": {"cpuMillicores": 2000, "memoryMiB": 2048},
+     "quota": {"cpuMillicores": 2000, "memoryMiB": 2048, "netBandwidthKbps": 51200},
      "usage": {
        "cpuSeconds": {
          "current": {"minute": 12.3, "hour": 300.5, "lifetime": 12345.6},
@@ -210,9 +226,10 @@ policy:
    ```
 
 2. `limits` 报告生效的已配置窗口；`current` 报告已配置窗口的窗口内计数器。即使未配置 lifetime 限额，lifetime 计数器也**必须**上报（计费需要它）。
-3. 对 `llmTokens` 各维度，`provenance` 报告这些量是如何得知的生命周期分解（§5.4）。三个值**必须**加总等于 lifetime 计数器，使租户能看清一份账单中有多少建立在估算之上。
-4. `state.exhausted` 列出当前已超限的（维度, 窗口）对；`state.held` 在 hold 待决期间为 true。
-5. SDK 以 `sandbox.resource` 暴露同一对象。
+3. `quota.netBandwidthKbps` 在设置时上报，不限时省略。它没有 `usage` 条目：速率上限没有计数器（§3.1）。累计出站量是 `usage.netEgressBytes`。
+4. 对 `llmTokens` 各维度，`provenance` 报告这些量是如何得知的生命周期分解（§5.4）。三个值**必须**加总等于 lifetime 计数器，使租户能看清一份账单中有多少建立在估算之上。
+5. `state.exhausted` 列出当前已超限的（维度, 窗口）对；`state.held` 在 hold 待决期间为 true。
+6. SDK 以 `sandbox.resource` 暴露同一对象。
 
 ## 10. 合并语义
 
@@ -220,11 +237,22 @@ policy:
 
 | 字段 | 合并细化 |
 | --- | --- |
-| `quota.*` | 显式值覆盖；缺省保持模板值。 |
+| `quota.cpuMillicores`、`quota.memoryMiB` | 显式值覆盖；缺省保持模板值。 |
+| `quota.netBandwidthKbps` | 被设置值中的最小值胜出；未设置的来源保持低优先级值。高优先级来源不能*抬高*低优先级来源设定的上限，也不能取消它。 |
 | `limits.*.windows` | 按（维度, 窗口）：被设置值中的最小值胜出；无任何来源设置的维度为不限。高优先级来源不能*移除*低优先级来源设置的限额。 |
 | `onExceeded`（默认与按维度） | 最严重者胜：`kill` > `hold` > `pause` > `warn`。 |
 | `notifications.thresholds` | 各来源取并集，去重并升序排列。 |
 | `notifications.webhook` | 各来源取并集（可加性观测）。 |
+
+`quota.cpuMillicores` 与 `quota.memoryMiB` 保持覆盖语义，因为那是今天的模板行为，改变它会打破既有调用方（[overview.md](./overview.md) §9）。`netBandwidthKbps` 是新字段，所以它从一开始就是只能收窄的 —— 共享合并原则在兼容性不逼迫的地方一律适用。
+
+### 10.1 可授权字段
+
+依 [overview.md](./overview.md) §5.1.8，每个模块都要声明自己的可授权面。**本模块没有。** 任何 `resource` 字段都**不得**被限时授权放宽。
+
+临时的额外消耗在这里本来就是一等操作，而它与授权的形状不同：审批 API（§7.3）是由 **hold** 驱动的，因此人是在沙箱真正需要更多的那一刻、看着超限的计数器做决定的。而授权是在需求被证明之前签发的预先批准。给本模块加上授权，等于让同一个结果拥有两套机制，而其中一套丢掉了另一套所依赖的信息。
+
+> **术语提示。** 审批 API（§7.3）的 `grant` 字段早于 [overview.md](./overview.md) §5.1 的限时授权，二者是不同的东西：前者是加到窗口计数器上的一笔额度，自身没有 TTL —— 它在窗口翻转时失效，或者对 `lifetime` 而言永不失效。这处冲突是真实存在的，已作为开放问题记录（[overview.md](./overview.md) §11.7）。
 
 ## 11. 错误
 
@@ -251,6 +279,9 @@ policy:
 12. **迟到修正。** 估算之后到达的权威 `usage` 只施加正增量；任何计数器都不曾下降。
 13. **来源标记暴露。** `response` / `estimated` / `reported` 的分解被上报，且加总等于 lifetime 计数器。
 14. 以沙箱作用域凭据调用 `report_usage` 被拒绝。
+15. **带宽整形。** 设置了 `quota.netBandwidthKbps` 时，一次持续传输大致以所配置的速率完成；没有连接被拒绝、没有 `resource.exhausted` 事件，且沙箱绝不因该上限而被 pause、hold 或 kill。该字段未设置时，同一次传输不被限速。
+16. **带宽不是限额。** 同时设置了 `quota.netBandwidthKbps` 与某个 `limits.netEgressBytes` 窗口的沙箱，在累计量达到时仍然触发该窗口的动作；整形只是推迟了那一刻。`netBandwidthKbps: 0` 被 `400 INVALID_POLICY` 拒绝。
+17. **带宽合并。** 请求设置的 `netBandwidthKbps` 高于模板值时解析为模板值；低于模板值时解析为请求值。
 
 ## 13. 开放问题
 
@@ -259,12 +290,16 @@ policy:
 3. **自动恢复。** `pause` 是否应在翻转时自动恢复（本文提出 SHOULD），还是要求显式恢复？
 4. **webhook 认证。** HMAC 签名方案？共享密钥存放于何处？
 5. **审批 RBAC。** 哪些主体可以审批：仅沙箱属主、命名空间运维，还是任何集群管理员？
-6. **grant 可见性。** grant 是否应体现在 `resource.usage`（如 `allowance` 字段），便于平台对批准的超额计费？
+6. **grant 可见性。** grant 是否应体现在 `resource.usage`（如 `allowance` 字段），便于平台对批准的超额计费？注意它与 [overview.md](./overview.md) §5.1 限时授权的命名冲突，已在那里作为 §11.7 跟踪 —— 无论最终哪个名字留下来，这个字段与那套机制都不得共用它。
 7. **按窗口的动作。** `onExceeded` 是否应支持按窗口设置而非按维度（如同一维度 `minute`→`pause`、`month`→`hold`）？
 8. **恢复/克隆时的计数器继承。** 本文默认清零；继承是否应作为运维选项？
 9. **估算方法。** §5.3 固定了估算值的*性质*（下界、由已观测内容推导）而非算法。算法及其预期误差是否应当公开，使租户能审计自己用量中被估算的那一部分？
 10. **缓存 Token 与推理 Token。** 供应商越来越多地把缓存读取与推理 Token 单独计量。它们是应成为各自独立的维度，还是折入 `input` / `output`？
+11. **入站整形。** §3.1 第 5 条只规定了出站。对于对外提供服务的沙箱（`network.ingress`），是否应存在入站上限？如果应该，鉴于沙箱并不能选择有多少流量到来，它究竟还算不算一个 `resource` 字段？
+12. **磁盘与 IOPS 配额。** `diskWriteBytes` 约束写入总量，但没有任何东西约束写入*速率*，也没有任何东西约束磁盘上的总占用。是否需要 `quota.diskIops` 与一个容量上限，还是实践中写入总量限额就够了？
+13. **按目标的速率。** 带宽上限是按沙箱的。速率能否附着到单条出站规则上，是这个问题的镜像，已在 [network.md](./network.md) §10.5 跟踪；它必须只被回答一次，而不是两次。
 
 ## 14. 非规范性说明
 
 - 全部维度在沙箱自身的内核记账（CPU 时间、块 I/O、接口统计）或出站 HTTP 路径（LLM `usage` 字段）中都有天然来源；窗口计数器由这些用量流推导。本规格只固定上述语义。
+- 带宽整形是这里唯一一份被*强制执行*而非*计量*的契约：平台是在给沙箱的出站流量调速，而不是在数它。由于该机制正落在 `netEgressBytes` 维度被测量的同一个接口上，两个数字天然保持一致 —— 这正是 §3.1 第 2 条固定测量点、而不把它留给实现的原因。
