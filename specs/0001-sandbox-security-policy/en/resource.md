@@ -169,6 +169,16 @@ The default is `hold`: configuring a limit is opting into governance, and hold i
 
 `policy.tier` ([overview.md](./overview.md) §7.1) does not change anything in this module. Both `baseline` and `restricted` resolve to template quotas, no windowed limits, and `onExceeded: hold` — the last of which is already the default above. This is stated rather than omitted because a reader who sees four modules shift under `tier: restricted` is entitled to know that the fifth deliberately does not: consumption budgets are workload-specific numbers, and there is no value for `llmTokens.total` that is "the restricted one". A tier that guessed would be a tier that breaks workloads for a security posture it cannot actually improve.
 
+### 6.1 Shadow evaluation support
+
+Per [overview.md](./overview.md) §7.2.5, this module states its position: **it has no shadow evaluation, because it has nothing to shadow.**
+
+The reasoning is the paragraph above. Shadow evaluation compares an enforced tier against a stricter one, and no tier changes any field here. There is no stricter set of limits for `auditTier: restricted` to evaluate against, so `auditTier` naming this module resolves to no findings — not because the mechanism is missing, but because the comparison is empty.
+
+This is not a gap to be closed later by adding shadow support. If it is ever worth answering "what would a tighter budget have blocked?", the answer already exists and is better: `onExceeded: warn` (§6) is that feature, arrived at from the other direction. A deployment that wants to observe a candidate limit sets the limit with `warn`, and gets exceedance events with real counters rather than a parallel evaluation of a number nobody has chosen. Two mechanisms for one outcome is what §10.1 already declines for grants, and the reasoning transfers unchanged.
+
+The distinction worth keeping straight: a shadow finding elsewhere in the proposal means "this operation would have been refused". Here the equivalent question is "this budget would have been exhausted", which is about a counter reaching a value rather than a decision about an operation — and counters are what this module exposes for real (§9) rather than in shadow.
+
 ## 7. Human intervention (hold)
 
 1. On a `hold` action the sandbox enters the **held** state: execution suspended (pause-equivalent), and a `resource.hold_requested` notification MUST be emitted immediately (independent of `notifications.thresholds`).

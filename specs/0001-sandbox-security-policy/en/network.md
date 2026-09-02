@@ -11,6 +11,8 @@ This spec defines the network sub-policy of the `SandboxPolicy` object:
 - **Egress** — L3/L4 reachability (IP/CIDR, domain-based with DNS learning), port and protocol scoping, and L7 HTTP/HTTPS rules.
 - **Ingress** — gating of public inbound access to the sandbox.
 
+Evaluation is **stateful**: rules describe connections, and the reply direction of an admitted connection needs no rule of its own (§4.7). This is the same contract a cloud security group offers, and it is what separates a reviewable rule set from one padded with reverse entries over the ephemeral port range.
+
 This spec **does not redefine** the existing egress grammar. The target syntax for `allowOut` / `denyOut`, the L7 rule grammar for `rules`, the DNS allow-listing and learning behavior, and the built-in private-CIDR denies are already specified by [Egress Network Policy](../../../guide/network-policy.md) and [Security Proxy](../../../guide/security-proxy.md). Those documents are incorporated by reference; this spec wraps them in the unified policy object and defines the merge, default, and compatibility contract.
 
 ## 2. Object model
@@ -87,6 +89,19 @@ Allow-before-deny (step 3 before step 4) is today's behavior and is preserved, b
 4. A request-level `allowOut` entry that is fully shadowed by a binding deny MUST NOT fail the create request. It MUST be reported in the create response as a `policyWarnings` entry `{field: "policy.network.allowOut", entry, shadowedBy, source}` and MUST be emitted as an audit event, so the caller learns that the hole it asked for was not opened (principle 4: denials are explainable).
 5. Provenance MUST be preserved in the effective policy exposed by the policy API, so an operator can see which source contributed each entry.
 
+### 4.7 Connection state
+
+Every rule in §4 describes a **connection**, not an individual packet. The distinction is normative, not an implementation detail:
+
+| | Requirement |
+| --- | --- |
+| Return traffic | Traffic belonging to a connection already admitted by §4.1 MUST be permitted for the life of that connection, without a matching rule of its own. |
+| Reply direction is not ingress | The inbound half of a sandbox-initiated connection is **not** ingress and MUST NOT be subject to `ingress.allowPublicTraffic` (§3). Setting `ingress.allowPublicTraffic: false` never breaks the response to an outbound request. |
+| Connectionless protocols | For UDP and ICMP, "connection" means a flow tracked by the platform with a documented idle timeout. The reply-direction guarantee applies to such a flow exactly as it applies to TCP. |
+| Port rules | A `PortRule` (§2.1) scopes the **destination** of the outbound half. Its reply traffic arrives on an ephemeral source port and is permitted by connection state, not by a second rule. |
+
+This is written down rather than left to the data path because it is the property that makes a rule set reviewable. Under a stateless model every `allowOut` entry would need a companion reverse entry covering the ephemeral port range — which is simultaneously the thing every author forgets and, once written, a hole far wider than the rule it was meant to serve. Cloud security groups are stateful for exactly this reason, and this spec inherits the expectation along with the grammar (§1).
+
 ## 5. Merge semantics
 
 On top of the shared rules in [overview.md](./overview.md) §5:
@@ -128,6 +143,17 @@ network:
 This is byte-for-byte today's behavior for requests that carry no network fields.
 
 Under `tier: restricted` the same fields resolve to a deny-all posture instead — `allowInternetAccess: false` and `ingress.allowPublicTraffic: false` — so that "no inbound or outbound access unless named" is one field on the policy rather than two per module. The tier only changes these defaults; every evaluation rule in §4 is unchanged, and an explicit field in the same source still wins ([overview.md](./overview.md) §7.1 rule 3).
+
+### 6.1 Shadow evaluation support
+
+Per [overview.md](./overview.md) §7.2.5, this module supports shadow evaluation under `auditTier` for its full egress and ingress surface. The stricter tier's rule set is evaluated alongside the enforced one; a connection the shadow set would have rejected is **established anyway** and emits a `shadow: true` audit event naming the destination, the port and protocol, and the shadow field that would have rejected it.
+
+This is the cheapest shadow in the proposal to act on, because the finding *is* the fix: a shadow report under `auditTier: restricted` is a list of the destinations a deny-all posture would need in `allowOut` or `portRules`. An operator can turn that list into the policy and then flip the tier.
+
+Two module-specific points:
+
+1. The built-in private-CIDR denies (§4.2) are in force under every tier, so they never appear as shadow findings. A destination denied today is denied in the shadow too; shadow evaluation reports what *would change*, not what already holds.
+2. Statefulness (§4.7) applies to the shadow evaluation as well. A shadow finding is emitted once per connection at establishment, not once per packet — without which the volume concern in [overview.md](./overview.md) §7.2.7 would make this unusable on any real workload.
 
 ## 7. Errors
 
@@ -174,6 +200,8 @@ Template merge applies unchanged: a template's network configuration becomes the
 12. **Port rule shadowing.** A target present in both `allowOut` and a narrower `portRule` is reachable on all ports, and the create response carries the `shadowed_by_allow_out` warning naming the rule.
 13. **Port rules are not an escape.** A `portRule` targeting a built-in private CIDR, or an address closed by a binding deny, does not open it.
 14. **Restricted tier.** `tier: restricted` with no network fields resolves to `allowInternetAccess: false` and `ingress.allowPublicTraffic: false`, and the effective policy records those expanded values. A source that sets `tier: restricted` and also `allowInternetAccess: true` explicitly gets `true` from that source, subject to the narrow-only rule against lower-precedence sources.
+15. **Statefulness.** With `allowInternetAccess: false` and a single `allowOut` entry for one destination, an outbound TCP connection to it succeeds **and its response is received** with no reverse rule present. The same holds for a `portRule`-admitted connection, whose reply arrives on an ephemeral source port. With `ingress.allowPublicTraffic: false` set at the same time, that response is still received — the reply direction is not ingress (§4.7).
+16. **Shadow evaluation.** With `tier: baseline` and `auditTier: restricted`, a connection to an unnamed public destination **succeeds** and emits a `shadow: true` event naming the destination and the field that would have rejected it. A connection to a built-in-denied private CIDR is rejected as it is today and emits **no** shadow finding. Nothing observable inside the sandbox differs from the same configuration without `auditTier`. One shadow event is emitted per connection, not per packet.
 
 ## 10. Open questions
 
@@ -182,8 +210,11 @@ Template merge applies unchanged: a template's network configuration becomes the
 3. IPv6/AAAA support in allow/deny and learning — out of scope for v1; confirm.
 4. **Denying by port.** §2.1 adds port scoping to the *allow* surface only. Should there be a port-scoped `denyOut` as well, or is "name what may be reached" sufficient given that a deny-all posture is one tier away?
 5. **Rate and reachability.** Bandwidth is a `resource.quota` dimension while reachability is here ([overview.md](./overview.md) §11.9). Should a `PortRule` be able to carry its own rate ceiling, or does that recreate the dialect problem the unified object exists to prevent?
+6. **Flow timeouts as policy.** §4.7 requires a documented idle timeout for connectionless flows but leaves the value to the platform. Should it be a policy field? A workload holding thousands of idle UDP flows is a resource question, which argues for leaving it out of `network` entirely — but the *reachability* consequence of an expiring flow lands here.
+7. **Identity-based targets.** Every target in this spec is an address or resolves to one. Peer-group references (the security-group model) and label selectors (the NetworkPolicy model) express "these workloads may talk to each other" without anyone writing a CIDR, which is what the multi-agent case needs. Tracked as [overview.md](./overview.md) §11.11, because the blocking obstacle is that sandbox-to-sandbox traffic rides on the ranges §4.2 denies unconditionally.
 
 ## 11. Non-normative notes
 
-- The existing data path (eBPF L3/L4 enforcement plus an L7 proxy for flagged HTTP/HTTPS) already satisfies overview principle 5 for this module; no enforcement-point change is required by this spec.
+- The existing data path (eBPF L3/L4 enforcement plus an L7 proxy for flagged HTTP/HTTPS) already satisfies overview principle 5 for this module; no enforcement-point change is required by this spec. Connection tracking (§4.7) is likewise a property the existing path already has — §4.7 documents it as a contract rather than requesting it.
 - **Rejected alternative for §4.6:** evaluating `denyOut` before `allowOut` unconditionally (a global deny-first model). It is the more familiar security model, but it changes the meaning of every existing configuration that punches an allow hole in a broad deny, which contradicts the compatibility promise in §9.1 and §6. Binding denies achieve the same protection against privilege escalation across sources while keeping single-source semantics byte-for-byte unchanged.
+- **Rejected alternative — implicit isolation.** A Kubernetes NetworkPolicy flips its target to default-deny for a direction as soon as any policy selects it: writing one allow rule implicitly denies everything else. It is an attractive property, because it makes the common intent ("only these destinations") impossible to express incompletely. It is rejected here because in this object an `allowOut` entry is additive by definition and has been since before this proposal: adopting implicit isolation would silently convert every existing configuration that lists a few allow entries alongside general internet access into a deny-all sandbox, which is the exact opposite of §9.1. The explicit form is `allowInternetAccess: false`, and `tier: restricted` makes it one field — the same destination reached without reinterpreting anyone's existing policy.

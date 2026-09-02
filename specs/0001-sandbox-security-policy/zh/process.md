@@ -8,7 +8,7 @@
 
 本规格定义 `SandboxPolicy` 对象的进程（`process`）子策略：适用于**已在沙箱内运行的进程**的约束，无论它是以何种方式启动的。它治理三件事：
 
-- **提权** — 进程是否可以获得它启动时并不持有的权限。
+- **权限** — 进程起步时带有哪些权限，以及它是否可以获得任何它启动时并不持有的权限。
 - **持久化** — 进程是否可以活得比启动它的会话更久。
 - **系统调用** — 沙箱到底可以使用哪些内核入口。
 
@@ -19,7 +19,7 @@
 | 问题 | 模块 |
 | --- | --- |
 | 这条命令可以通过 API 被启动吗？ | `exec` |
-| 这个运行中的进程可以提权、可以持久化、可以发起这个系统调用吗？ | `process`（本规格） |
+| 这个运行中的进程可以以这个用户运行、可以提权、可以持久化、可以发起这个系统调用吗？ | `process`（本规格） |
 | 它可以读写这个路径吗？ | `filesystem` |
 | 它可以访问这个目标吗？ | `network` |
 | 它可以消耗这么多吗？ | `resource` |
@@ -33,8 +33,9 @@ policy:
   process:
     mode:                 baseline | unrestricted   # 默认：baseline
     noNewPrivileges:      bool                      # 默认：false
+    runAsNonRoot:         bool                      # 默认：false
     allowDaemonize:       bool                      # 默认：true
-    allowedCapabilities:  [string]                  # 默认：平台默认集合
+    allowedCapabilities:  [string]                  # 默认：平台默认集合；["none"] = 空集
     audit:                none | metadata           # 默认：none
     syscall:
       mode:                       baseline | denylist | allowlist   # 默认：baseline
@@ -62,7 +63,10 @@ policy:
 
 1. 非空时，`allowedCapabilities` 就是沙箱内任何进程可用能力的**完整**集合。集合之外的能力**不得**可被获取，包括沙箱内的特权用户也不行。
 2. 条目是不带厂商前缀的能力名（`net_bind_service`、`sys_admin` 等）。未知名称**必须**以 `400 INVALID_POLICY` 拒绝。
-3. 空列表表示"平台默认集合"，而不是"没有能力"。要表达"移除全部权限"，得写成一份显式的、无权限的策略 —— 也就是指名工作负载确实需要的那个小集合，而绝不是靠省略（原则 2）。
+3. 空列表表示"平台默认集合"，而不是"没有能力"。省略绝不意味着限制（原则 2），所以需要一个窄集合的工作负载就指名那个集合。
+4. **空集** —— 完全没有任何能力，也就是本字段最强的形态 —— 写作保留的单一条目 `["none"]`。它**不得**与任何能力名混用；`["none", "net_bind_service"]` **必须**以 `400 INVALID_POLICY` 拒绝，因为它读起来像"没有，除了……"，而那什么意思都不是。
+
+   规则 4 之所以存在，是因为规则 1 与规则 3 合在一起，使本字段中最有价值的那个取值变得无法表达。`[]` 已经被"平台默认集合"占用，所以在 `["none"]` 之前，接近零能力的唯一办法是指名一个集合并期待它足够小 —— 那是对唯一一种评审者能一眼验证的姿态的近似。对于不需要任何能力的工作负载（即绝大多数 Agent 生成的代码而言），丢弃全部能力是可获得的最有效的单项加固措施，它不该需要一个变通写法。这里用一个拼写出来的保留词而不是复用 `[]`，是为了让省略与空列表继续表示同一件事，而这正是原则 2 的要求。
 
 ### 3.3 `allowDaemonize`
 
@@ -79,6 +83,28 @@ policy:
 1. 自启型持久化写在**文件**里：`crontab` 条目、systemd unit、shell profile 脚本、`~/.bashrc`、XDG autostart 条目。阻止它是 `filesystem` 的事（`denyPaths`、`readOnlyPaths`），而不是系统调用或会话的事，因为内核里没有哪个入口点的含义是"把我注册到以后运行"。
 2. 一份设置了 `allowDaemonize: false` 却把那些路径留作可写的策略，只关上了一扇门。在意持久化的部署**应该**为其镜像支持的持久化位置配上 `filesystem` 拒绝。
 3. 因此本模块约束的是*当前这个*进程的存活时长，而不是工作负载卷土重来的能力。把这一点说出来正是关键：另一种做法是交付一个以它无法兑现的保证来命名的字段。
+
+### 3.5 `runAsNonRoot`
+
+§3.1 管的是一个进程**可以获得**的特权。它对一个进程**起步时就带有**的特权只字未提，而这处遗漏的受力方向是错的：`noNewPrivileges: true` 施加在一个已经以 uid 0 运行的进程上什么也保护不了，因为已经没有什么可供它去获得了。
+
+取 `true` 时：
+
+1. 沙箱内任何进程都**不可以**以 uid 0 运行。这适用于每一个进程，无论它以何种方式启动 —— 与 §4.5.1 同样的普遍适用性。
+2. 若解析出的沙箱用户会是 uid 0 —— 因为镜像默认用户是 root 且未指定其他用户 —— 则创建请求**必须**以 `400 INVALID_POLICY` 拒绝，并指名解析出的那个用户。在创建时失败是刻意的：另一种结果是沙箱起来了，然后在它的第一个进程上失败，而那个位置离肇因策略很远。
+3. 运行时试图变成 uid 0 —— `setuid(0)` 及其同类 —— **必须**被拒绝，且**必须**在进程持有本来允许该操作的那个能力时也被拒绝。一个进程能放弃的属性，就不是一个属性。
+4. 检查的是数值 uid 0，而不是名字 `root`。一个能靠给账户改名来满足的策略不是策略。
+
+`runAsNonRoot` 与 `noNewPrivileges` 相互独立且互补，两者都值得设置：
+
+| | 起步时无特权 | 起步时即 root |
+| --- | --- | --- |
+| `noNewPrivileges: true` | 无法获得特权 —— 有效 | 已经什么都有了 —— **毫无作用** |
+| `runAsNonRoot: true` | 本来就成立 —— 无变化 | 在创建时被拒（规则 2） |
+
+默认值在 `baseline` 分级下是 `false`、在 `restricted` 下是 `true`（[overview.md](./overview.md) §7.1），与 `noNewPrivileges` 是同一种切分，理由也相同：一个镜像要么以 root 运行要么不是，这个答案无需知道工作负载就能得到，而按规则 2 失败是立即的、并且会指名自己的原因。有必要明说的是，这让 `tier: restricted` **直接拒绝以 root 为默认用户的镜像**。这不是一个需要被抹平的副作用 —— 它就是这个分级的含义；而一个在 `restricted` 下确实需要 root 默认镜像的运维会显式写 `runAsNonRoot: false`，那是在生效策略里可见的（§7.1 规则 3）。
+
+注意与 [exec.md](./exec.md) §5 的分工。`exec.allowedUsers` 约束的是**经控制接口**提交的命令可以以哪个用户运行；`runAsNonRoot` 约束的是沙箱内每一个进程，无论其来源。`exec` 那个字段是 API 上的一道门禁，而这一个是沙箱的一项属性 —— 与 [overview.md](./overview.md) §2.3 为这两个模块中其他每一对字段划出的，是同一种不对称。
 
 ## 4. 系统调用语义
 
@@ -175,8 +201,9 @@ deniedSyscalls:
 | --- | --- | --- | --- | --- |
 | `mode` | `enum?` | `baseline` \| `unrestricted` | `baseline` | §4.1。`unrestricted` 停用 §3 与 §4。 |
 | `noNewPrivileges` | `bool?` | — | `false` | §3.1。 |
+| `runAsNonRoot` | `bool?` | — | `false` | §3.5。 |
 | `allowDaemonize` | `bool?` | — | `true` | §3.3。 |
-| `allowedCapabilities` | `[string]?` | 已知能力名。 | `[]` = 平台默认集合 | §3.2。 |
+| `allowedCapabilities` | `[string]?` | 已知能力名，或保留的单一条目 `["none"]`，后者**不得**与名称混用。 | `[]` = 平台默认集合 | §3.2。 |
 | `audit` | `enum?` | `none` \| `metadata` | `none` | 进程策略事件的审计级别（§6）。 |
 | `syscall.mode` | `enum?` | `baseline` \| `denylist` \| `allowlist` | `baseline` | §4.1。 |
 | `syscall.baselineVersion` | `string?` | 已发布的集合标识。未知取值**必须**以 `400 INVALID_POLICY` 拒绝。 | 平台默认值 | §4.3。 |
@@ -197,10 +224,13 @@ deniedSyscalls:
 | `mode` | `baseline` | `baseline` |
 | `syscall.mode` | `baseline` | `baseline` |
 | `noNewPrivileges` | `false` | `true` |
+| `runAsNonRoot` | `false` | `true` |
 | `allowDaemonize` | `true` | `false` |
 | `audit` | `none` | `metadata` |
 
-两个分级都让 `syscall/1` 拒绝集合生效。只有提权与持久化不同，因为这是两个无需知道工作负载就能做的决定：一个镜像要么需要 `sudo`，要么不需要，而无论哪种情况失败都是立即且可读的。系统调用面不是分级该决定的事，理由正相反 —— 进一步收窄它需要知道镜像用到哪些系统调用，而一个会去猜的分级会产生 §4.4 存在的目的所要防止的"进程起不来"式失败。`restricted` 是否应该引入第二个更大的基线集合，记录为 §10.2。
+两个分级都让 `syscall/1` 拒绝集合生效。只有特权与持久化不同，因为这是无需知道工作负载就能做的决定：一个镜像要么需要 `sudo` 要么不需要，要么以 root 运行要么不是，而无论哪种情况失败都是立即且可读的。系统调用面不是分级该决定的事，理由正相反 —— 进一步收窄它需要知道镜像用到哪些系统调用，而一个会去猜的分级会产生 §4.4 存在的目的所要防止的"进程起不来"式失败。`allowedCapabilities` 因同样的理由被留在原样：`["none"]` 对大多数 Agent 工作负载是对的取值，对任何要绑定特权端口的镜像是错的取值，而分级分不清自己手上是哪一种。`restricted` 是否应该引入第二个更大的基线集合，记录为 §10.2。
+
+在这几项里，`runAsNonRoot: true` 是最有可能直接拒掉一个存量镜像的那一项（§3.5 规则 2）。这是有意的，而 [overview.md](./overview.md) §7.2 就是运维在真正投入之前弄清这件事的方式：`auditTier: restricted` 会上报哪些沙箱*本来会*被拒，而不拒任何一个。
 
 这里的 `tier: baseline` 并不是逐字节等于今天的行为 —— `syscall/1` 集合是新的，而本模块此前并不存在。它是兼容性规则两处刻意例外之一（[overview.md](./overview.md) §9），并且受到与另一处相同的约束：集合是带版本、可 pin 的，且可通过 `baselineExceptions` 逐条逃出（§4.3）。
 
@@ -209,15 +239,31 @@ deniedSyscalls:
 | 错误码 | 呈现面 | 载荷 | 何时 |
 | --- | --- | --- | --- |
 | `POLICY_PROCESS_SYSCALL_DENIED` | 对进程返回 `EPERM`；审计事件 | `{syscall, mode, source}` | 某个系统调用按 §4.1 被拒绝。 |
-| `POLICY_PROCESS_PRIVILEGE_DENIED` | OS 级失败；审计事件 | `{operation, binary?}` | 按 §3.1 拒绝提权，或按 §3.2 拒绝某项能力。 |
+| `POLICY_PROCESS_PRIVILEGE_DENIED` | OS 级失败；审计事件 | `{operation, binary?}` | 按 §3.1 拒绝提权、按 §3.2 拒绝某项能力，或按 §3.5.3 拒绝一次变成 uid 0 的尝试。 |
 | `POLICY_PROCESS_PERSISTENCE_DENIED` | OS 级失败；审计事件 | `{operation}` | 按 §3.3 拒绝脱离或重挂父进程。 |
-| `INVALID_POLICY` | `400` | `{field, reason}` | 未知系统调用名或能力名、例外不在被 pin 集合中、`allowlist` 下 `allowedSyscalls` 为空、字段与模式不匹配。 |
+| `INVALID_POLICY` | `400` | `{field, reason}` | 未知系统调用名或能力名、`["none"]` 与能力名混用、`runAsNonRoot: true` 下解析出的沙箱用户为 uid 0（§3.5.2）、例外不在被 pin 集合中、`allowlist` 下 `allowedSyscalls` 为空、字段与模式不匹配。 |
 
 与 `filesystem` 一样，强制执行错误是 OS 级而非 API 级的，因为策略作用于 API 层之下。
 
 `audit: metadata` 下的审计事件：`{sandboxID, event: syscall_denied|privilege_denied|persistence_denied, syscall?, operation?, pid, comm, outcome: denied|killed, effectivePolicyVersion}`。每一个生效的 `baselineExceptions` 条目在创建时产生 `{sandboxID, baselineVersion, exception, sources}`（§4.3）。审计事件**不得**写入沙箱内部。
 
 一个触发了系统调用拒绝的工作负载通常会反复触发它。实现**应该**聚合相同的 `{syscall, pid}` 拒绝，而不是每次调用发一条事件，使审计流在一份很紧的 `allowlist` 下仍然可读。
+
+### 6.1 影子评估支持
+
+依 [overview.md](./overview.md) §7.2.5，本模块声明它在 `auditTier` 之下支持什么。本模块正是影子评估存在的理由：`syscall/1` 与 `restricted` 的展开内容是最有可能弄坏一个镜像的变更，而其损坏形态最不可读。
+
+| 字段 | 是否影子 | 方式 |
+| --- | --- | --- |
+| `syscall.*` | 是 | 更严的集合与被强制执行的集合并行求值；影子集合本来会拒绝的调用产生一条 `shadow: true` 事件并照常执行。 |
+| `noNewPrivileges`、`allowDaemonize` | 是 | 操作按被强制执行的取值照常进行；一条影子事件记录下更严的取值本来会拒绝它。 |
+| `allowedCapabilities` | 是 | 使用影子集合之外的某项能力时产生一条影子事件。 |
+| `runAsNonRoot` | 是，**在创建时** | §3.5.2 让这一项成为创建时检查，因此影子发现在创建时产生："这个沙箱在 `restricted` 之下本来会被拒"。这是本模块中价值最高的一条影子发现，因为它正是把一次 fleet 范围的铺开变成一份待修镜像清单的那一条。 |
+
+有两条约束来自机制本身而不是取舍偏好：
+
+1. 系统调用的影子评估**不得**改变被强制执行的过滤器。既上报一次本来会发生的拒绝、又放行该调用，需要一个既记录又允许的过滤动作；机制上无法同时做到记录与允许的部署**不得**用"改成拒绝"来近似它。
+2. 影子拒绝**不得**以任何形式被上报给进程，依 [overview.md](./overview.md) §7.2.4。进程什么都学不到；审计流什么都学到。
 
 ## 7. 合并语义
 
@@ -227,8 +273,9 @@ deniedSyscalls:
 | --- | --- |
 | `mode` | 最严格者胜出：任一来源为 `baseline`，结果即为 `baseline`。 |
 | `noNewPrivileges` | `true` 胜出。 |
+| `runAsNonRoot` | `true` 胜出。 |
 | `allowDaemonize` | `false` 胜出。 |
-| `allowedCapabilities` | 各来源取**交集**（只能收窄）。请求不能添加模板未许可的能力。 |
+| `allowedCapabilities` | 各来源取**交集**（只能收窄）。请求不能添加模板未许可的能力。`["none"]` 与任何集合取交集都是 `["none"]`，因为它就是空集（§3.2.4）。 |
 | `syscall.mode` | 最严格者胜出：`allowlist` > `denylist` > `baseline`。 |
 | `syscall.baselineVersion` | 被 pin 的最新版本胜出；由于版本只追加条目（§4.3.2），最新也即最严格。 |
 | `syscall.baselineExceptions` | 交集：一个例外只有在每个来源都声明它时才生效。 |
@@ -246,10 +293,14 @@ deniedSyscalls:
 | --- | --- |
 | `syscall.baselineExceptions` — 指名条目，限定窗口内 | `mode: unrestricted` |
 | `syscall.allowedSyscalls` — 向被许可集合指名追加 | `noNewPrivileges: false` |
-| `allowedCapabilities` — 指名能力 | `syscall.implicitEssentialSyscalls` |
-| `allowDaemonize: true` | |
+| `allowedCapabilities` — 指名能力 | `runAsNonRoot: false` |
+| `allowDaemonize: true` | `syscall.implicitEssentialSyscalls` |
 
 `mode: unrestricted` 与 `noNewPrivileges: false` 被排除，是因为授权必须是"一个形状已知的洞"（[overview.md](./overview.md) §5.1.4）。翻转 `noNewPrivileges` 会一次性打开镜像中的每一个 setuid 二进制与每一项文件能力；批准它的运维无法知道自己批准了什么。一个确实需要十分钟特权的任务，去申请它需要的那项能力 —— 那是可评审的，且到期后自动收回。
+
+`runAsNonRoot: false` 被排除的理由比"形状"更强：它在原理上就无法被授权。按 §3.5.2 这个字段在创建时就已解析，而一个以非 root 用户启动的沙箱无法被交给十分钟的 uid 0 再被拿回来 —— 已经在跑的那些进程得改变身份，而它们以 root 创建的任何文件都会活得比这份授权更久。一份效果比自己的到期更长命的授权就不是限时的，而限时是 §5.1 的全部前提。需要 root 是沙箱的一项属性，所以它属于沙箱创建时所用的那份策略。
+
+针对 `allowedCapabilities: ["none"]` 授权一项能力是允许的，而且这正是"这个任务需要做一次特权操作"的预期处理方式：沙箱以零能力运行，在一个限定窗口内收到它确实需要的那一项，然后回到零。这和其他一切一样受上限约束 —— 如果是模板设了 `["none"]`，那就是一条模板限制，任何授权都不得重新打开它。
 
 这里的每一份授权都仍受上限约束（[overview.md](./overview.md) §5.1.3）：授权**不得**重开模板或策略档已关闭的能力或系统调用。
 
@@ -260,28 +311,34 @@ deniedSyscalls:
 3. **刻意的排除。** 只有基线生效时，`ptrace`、`unshare`、`chroot` 成功，而 `setns` 被拒绝。
 4. **不可逆性。** 进程无法解除 `noNewPrivileges`、无法重获 `allowedCapabilities` 之外的能力、无法移除自己的系统调用过滤器。后代进程继承这三者。
 5. **提权。** `noNewPrivileges: true` 时执行 setuid 二进制不产生提权；`noNewPrivileges: false`（baseline 分级默认值）时同一个二进制的行为与今天一致。
-6. **持久化。** `allowDaemonize: false` 时，`setsid` 与双重 `fork` 变孤儿被拒绝，且终止一个会话会终止其整个进程组。默认 `true` 时，两者都与今天一样可用。
-7. **用名字，不用编号。** 使用数字型系统调用编号的策略被拒绝；指名了一个有多个编号变体的系统调用的策略，在每一个受支持架构上覆盖其全部变体。
-8. **未知条目。** 未知系统调用名、未知能力名、以及不在被 pin 集合中的 `baselineExceptions` 条目，各自都以 `400 INVALID_POLICY` 并带 `field` 指针被拒绝。
-9. **必需集合。** `syscall.mode: allowlist` 且 `allowedSyscalls: [read, write]`，在 `implicitEssentialSyscalls: true` 下能成功启动进程，且生效策略记录了所施加的必需集合版本。在 `implicitEssentialSyscalls: false` 与同一份清单下，进程创建以一条带审计事件的策略拒绝失败 —— 而不是以一次无从解释的崩溃失败。
-10. **违规动作。** `onViolation: deny` 返回 `EPERM` 并让进程继续运行；`onViolation: kill` 终止它。两者都产生携带 `effectivePolicyVersion` 的审计事件。
-11. **版本 pin。** 已 pin 到 `syscall/1` 的沙箱在平台默认值推进到 `syscall/2` 时不受影响；未 pin 的沙箱无论如何都在其生效策略与快照中记录解析出的版本。
-12. **合并。** `allowedCapabilities` 与 `allowedSyscalls` 在各来源间取交集 —— 请求无法放宽其中任何一个。`noNewPrivileges: true`、`allowDaemonize: false`、`onViolation: kill` 以及最严格的 `syscall.mode`，各自都从任一来源胜出。
-13. **例外取交集。** 请求声明了但模板未声明的 `baselineExceptions` 条目不生效，且其不生效按 [overview.md](./overview.md) §5 被报告。
-14. **授权。** 一份追加了某项具名能力的授权，在沙箱或任务不做任何动作的情况下到期，之后该能力再次不可用；试图授予 `mode: unrestricted` 或 `noNewPrivileges: false` 的授权被拒绝；试图重开模板已关闭能力的授权以 `POLICY_GRANT_EXCEEDS_CEILING` 被拒绝。
-15. **无旁路。** 从沙箱内部看，被拒绝的系统调用与普通权限失败无法区分；命中的规则只出现在审计流中。
+6. **起始身份。** `runAsNonRoot: true` 时，解析出的用户为 uid 0 的沙箱在创建时以 `400 INVALID_POLICY` 被拒并指名该用户；运行中的进程即便持有本来允许该操作的能力，也无法经 `setuid(0)` 抵达 uid 0。一个已从 `root` 改名但仍是 uid 0 的账户被拒；一个名叫 `root` 但 uid 非零的账户不被拒。在 baseline 分级默认值 `false` 下，root 默认镜像的启动与今天一致。
+7. **单靠 `noNewPrivileges` 是不够的。** 一个以 uid 0 运行、配置了 `noNewPrivileges: true` 与 `runAsNonRoot: false` 的沙箱，仍然能做 uid 0 能做的一切。这一条被写成测试断言，是为了让 §3.5 里的那处局限保持可见，而不是日后以一份漏洞报告的形式被重新发现。
+8. **零能力。** `allowedCapabilities: ["none"]` 产生一个沙箱，其中任何进程都没有任何可用能力，包括以 uid 0 运行的进程。`["none"]` 与任何能力名混用以 `400 INVALID_POLICY` 被拒。空列表 `[]` 解析为平台默认集合，**不是**空集。
+9. **持久化。** `allowDaemonize: false` 时，`setsid` 与双重 `fork` 变孤儿被拒绝，且终止一个会话会终止其整个进程组。默认 `true` 时，两者都与今天一样可用。
+10. **用名字，不用编号。** 使用数字型系统调用编号的策略被拒绝；指名了一个有多个编号变体的系统调用的策略，在每一个受支持架构上覆盖其全部变体。
+11. **未知条目。** 未知系统调用名、未知能力名、以及不在被 pin 集合中的 `baselineExceptions` 条目，各自都以 `400 INVALID_POLICY` 并带 `field` 指针被拒绝。
+12. **必需集合。** `syscall.mode: allowlist` 且 `allowedSyscalls: [read, write]`，在 `implicitEssentialSyscalls: true` 下能成功启动进程，且生效策略记录了所施加的必需集合版本。在 `implicitEssentialSyscalls: false` 与同一份清单下，进程创建以一条带审计事件的策略拒绝失败 —— 而不是以一次无从解释的崩溃失败。
+13. **违规动作。** `onViolation: deny` 返回 `EPERM` 并让进程继续运行；`onViolation: kill` 终止它。两者都产生携带 `effectivePolicyVersion` 的审计事件。
+14. **版本 pin。** 已 pin 到 `syscall/1` 的沙箱在平台默认值推进到 `syscall/2` 时不受影响；未 pin 的沙箱无论如何都在其生效策略与快照中记录解析出的版本。
+15. **合并。** `allowedCapabilities` 与 `allowedSyscalls` 在各来源间取交集 —— 请求无法放宽其中任何一个，且任一来源给出 `["none"]` 时结果就是 `["none"]`。`noNewPrivileges: true`、`runAsNonRoot: true`、`allowDaemonize: false`、`onViolation: kill` 以及最严格的 `syscall.mode`，各自都从任一来源胜出。
+16. **例外取交集。** 请求声明了但模板未声明的 `baselineExceptions` 条目不生效，且其不生效按 [overview.md](./overview.md) §5 被报告。
+17. **授权。** 一份追加了某项具名能力的授权，在沙箱或任务不做任何动作的情况下到期，之后该能力再次不可用；针对 `["none"]` 的授权行为完全相同，并在到期时让沙箱回到零能力。试图授予 `mode: unrestricted`、`noNewPrivileges: false` 或 `runAsNonRoot: false` 的授权被拒绝；试图重开模板已关闭能力的授权以 `POLICY_GRANT_EXCEEDS_CEILING` 被拒绝。
+18. **无旁路。** 从沙箱内部看，被拒绝的系统调用与普通权限失败无法区分；命中的规则只出现在审计流中。
+19. **影子评估。** 在 `tier: baseline` 配 `auditTier: restricted` 下，镜像以 root 运行的沙箱**被成功创建**，并产生一条指名 `runAsNonRoot` 的创建时影子发现；一次 `setsid` 调用成功，并产生一条指名 `allowDaemonize` 的影子发现。没有任何操作被拒绝、没有返回 `EPERM`，且沙箱内部无法区分这份带影子的配置与不带影子的配置。每条影子事件都携带 `shadow: true` 与解析出的 `auditTier`。等于或宽于 `tier` 的 `auditTier` 以 `400 INVALID_POLICY` 被拒。
 
 ## 10. 开放问题
 
 1. **进程数与 fork 炸弹。** 进程数上限属于消耗量，按本提案划的缝它应归 `resource` —— 但它在进程创建时强制执行，和本文档里的一切一样。归哪个模块？
 2. **restricted 分级的系统调用集合。** `tier: restricted` 目前展开为与 `tier: baseline` 相同的基线集合（[overview.md](./overview.md) §7.1）。`restricted` 是否应该引入第二个更大的带版本集合（追加 `mount`、`umount2`、`unshare`），而不是只收紧权限与持久化？
-3. **画像生成。** §4.4.2 建议由观测画像生成 `allowlist` 策略。平台是否应把这项观测作为受支持的功能提供（一种"记录系统调用、产出候选策略"的模式），还是手写白名单是唯一受支持的路径？
-4. **能力默认集合。** §3.2.3 把"平台默认集合"留给了平台。该默认集合本身是否应成为一个带版本、已发布的集合，条件与系统调用基线相同，从而可 pin、可审计？
+3. **画像生成。** §4.4.2 建议由观测画像生成 `allowlist` 策略。影子评估（§6.1）提供了答案的一半 —— 它观测一个更严的集合*本来会*拒绝什么 —— 但影子报告是一份发现清单，不是一份策略。平台是否应该补上这段距离、从一个观测窗口产出候选的 `allowedSyscalls`，还是"由影子发现指导的手写白名单"是唯一受支持的路径？
+4. **能力默认集合。** §3.2.3 把"平台默认集合"留给了平台。该默认集合本身是否应成为一个带版本、已发布的集合，条件与系统调用基线相同，从而可 pin、可审计？这个问题随 §3.2.4 变得更尖锐了：既然 `["none"]` 已经精确指名了取值范围的一端，"平台默认成什么样"就成了本字段中唯一一个评审者看不见的取值。
 5. **持久化路径集合。** §3.4 把自启型持久化推给了 `filesystem`。文件系统基线是否应新增一个带版本的持久化路径集合（`crontab`、systemd unit、shell profile），让 `allowDaemonize: false` 有一个已文档化的搭档，而不只是一条建议？
 6. **热施加。** 更新后的进程策略能否施加到已在运行的进程，还是只对新进程生效？系统调用过滤器通常在进程创建时安装，并按设计不可逆，这暗示"仅新进程" —— 而按 [overview.md](./overview.md) §11.2，那将意味着本模块无法针对已在运行的进程接受授权。本规格**不得**在没有明确答案的情况下发布。
+7. **非 root 与可写面。** `runAsNonRoot: true`（§3.5）改变了工作负载所创建的一切归属于哪个 uid，而它与 `filesystem.writableRoots` 的交互尚未规定：一个属主为 uid 0 的可写根对一个非 root 进程并不可写，因此这两个字段可以各自合法而合在一起不可用。平台是否应在创建时校验这一对、还是调整已声明可写根的属主、还是把它留给镜像？无论答案是哪个，"沙箱起来了却没有任何地方可写"是那个要避免的失败形态。
 
 ## 11. 非规范性说明
 
-- 本文档的每一条要求都可以用按进程、非特权、按沙箱的机制表达（在进程创建时安装的 seccomp 式过滤器、内核的 no-new-privileges 标记、bounding 能力集、按会话的进程组跟踪）。与本提案其他部分一样，规格固定的是*属性*，机制选型留待开放。
+- 本文档的每一条要求都可以用按进程、非特权、按沙箱的机制表达（在进程创建时安装的 seccomp 式过滤器、内核的 no-new-privileges 标记、bounding 能力集、按会话的进程组跟踪）。与本提案其他部分一样，规格固定的是*属性*，机制选型留待开放。影子评估（§6.1）也不例外：常用的过滤机制都提供一个"记录并允许"的动作，而那正是那里的规则 1 所要求的。
 - 每沙箱一个内核的模型，是系统调用策略负担得起的原因：过滤器的作用域是单一租户的内核，因此收窄它不会波及邻居（[overview.md](./overview.md) §12）。
-- 参考过的类比对象：Kubernetes Pod Security Standards 与 `seccompProfile`、Docker 默认 seccomp 画像与 `--security-opt no-new-privileges`、systemd unit sandboxing 指令。
+- 参考过的类比对象：Kubernetes Pod Security Standards（`runAsNonRoot`、`allowPrivilegeEscalation`、`capabilities.drop`）与 `seccompProfile`、Docker 默认 seccomp 画像与 `--security-opt no-new-privileges`、systemd unit sandboxing 指令。
+- **关于用 `["none"]` 而不是 `[]`：** Kubernetes 把同一个想法拼作 `capabilities.drop: ["ALL"]`，那在它那里可行，因为它有一个独立的 `add` 列表，也没有一个"平台默认"取值来抢位置。本字段只有一个列表，而 `[]` 已经被默认集合占用，所以保留词是唯一一种不会让省略与空列表表示不同含义的拼法。选 `none` 而不是 `all`，是因为本列表指名的是被**允许**的东西；`drop: ALL` 与 `allowed: none` 是从相反两端描述同一种姿态。

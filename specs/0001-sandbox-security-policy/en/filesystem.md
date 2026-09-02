@@ -174,6 +174,14 @@ Note that `baseline` and `restricted` share `mode: baseline`. That is deliberate
 
 `tier: restricted` changes one field: mounts arrive read-only unless the mount request asks for write. It does not narrow the in-sandbox path rules, because there is no useful guess to make — a restricted tier that turned on `writableRoots` would have to invent the root, and inventing `/workspace` for an image that builds in `/src` is the confusing-build-failure outcome §6.4 exists to avoid.
 
+### 6.6 Shadow evaluation support
+
+Per [overview.md](./overview.md) §7.2.5, this module supports shadow evaluation under `auditTier` for its full path surface: `mode`, the resolved baseline set, `denyPaths`, `readOnlyPaths`, `writableRoots`, and `mounts.defaultReadOnly`. An access the shadow configuration would have refused **succeeds** and emits a `shadow: true` audit event carrying the path, the operation, and the shadow rule that would have refused it.
+
+The path surface has a volume problem the other modules do not, and it has to be handled rather than noted. A build that walks a tree touches the same directories thousands of times, so a shadow finding emitted per access would bury the finding that matters. Implementations **SHOULD** therefore aggregate shadow findings by `{rule, operation}` and report the distinct paths involved up to a bounded count, rather than emitting one event per access ([overview.md](./overview.md) §7.2.7).
+
+One asymmetry is worth stating, because it limits what a shadow report can promise here. A denied *read* is usually recoverable — the workload gets `EACCES` and fails visibly. A denied *write* may leave the workload in a state it cannot report, and a shadow evaluation cannot tell the difference: it observes the access, not the consequence. A clean shadow report therefore means "nothing would have been refused", not "the stricter policy is safe to adopt". For `mounts.defaultReadOnly` in particular, read the report as a list of write locations to declare, not as a verdict.
+
 ## 7. Merge semantics
 
 On top of [overview.md](./overview.md) §5:

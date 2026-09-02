@@ -171,6 +171,19 @@ exec:
 
 The above is the `baseline` tier ([overview.md](./overview.md) §7.1). `tier: restricted` changes exactly one field here — `audit: metadata` — and deliberately leaves `mode` at `unrestricted`. Two reasons, both already stated elsewhere and repeated because their absence would look like an oversight: `allowlist` requires a non-empty `allowedCommands` (§5), so a tier selecting it would make `tier: restricted` alone fail validation; and per §3.6 an allowlist is not what contains an admitted interpreter anyway. A deployment that wants a command allowlist declares it, because only that deployment knows its command list. What the tier can supply without guessing is the audit trail, so that is what it supplies.
 
+### 6.1 Shadow evaluation support
+
+Per [overview.md](./overview.md) §7.2.5, this module must state what it supports under `auditTier`, and the honest answer is **almost nothing, for a reason that is not a limitation of the mechanism**.
+
+Shadow evaluation reports what a stricter tier *would* have denied. The only field `tier: restricted` changes here is `audit`, and a stricter audit level denies nothing — so there is nothing for a shadow evaluation of the current tier set to find. `auditTier: restricted` against this module is a well-formed no-op, and this section exists so that a reader does not mistake the silence for an unimplemented feature.
+
+Two consequences follow:
+
+1. An `auditTier` that names only this module's fields MUST still be accepted if it is valid under [overview.md](./overview.md) §7.2.2 — the validation rule is about tiers, not about how much each module has to say. The effective policy records it, and no shadow events result.
+2. If the stricter fourth tier contemplated in [overview.md](./overview.md) §11.4 is ever defined, it *does* require an `exec` allowlist, and shadow evaluation of this module becomes both meaningful and easy: the command is already parsed into subcommands at the control interface (§4.3), so evaluating a second rule set against the same decomposition costs one more pass. Support would then be: a command the shadow allowlist would reject **runs anyway** and emits a `shadow: true` event naming the unmatched subcommand. That is the mechanism this module would use; there is currently no tier that asks for it.
+
+The broader point is the one §3.6 already makes. Even a fully shadowed `exec` allowlist would report only on commands submitted through the API, which for agent-generated code is one interpreter invocation followed by silence. The shadow findings that tell an operator whether `restricted` is adoptable come from `process`, `filesystem`, and `network`.
+
 ## 7. Errors and observability
 
 Structured error payloads (all enforcement errors carry them so agents can self-correct):
