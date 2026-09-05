@@ -27,6 +27,8 @@ policy:
     readOnlyPaths:   [string]                  # read allowed, writes denied
     writableRoots:   [string]                  # inverse form: writes allowed only under these roots
     implicitRuntimeWritable: bool              # default: true
+    onViolation:     deny | kill               # default: deny
+    audit:           none | metadata           # default: none
     mounts:
       allowedHostPrefixes: [string]            # host paths that may be mounted
       defaultReadOnly:     bool                # default: false
@@ -81,6 +83,21 @@ For any filesystem access by any sandbox process, the decision MUST be:
 3. Prefix validation MUST resolve `..` before matching (path-traversal attempts rejected).
 4. The cluster-side operator allowlist remains as a **bounding constraint**: the effective `allowedHostPrefixes` MUST be the intersection of policy-declared prefixes and operator-configured prefixes. Policy cannot widen what the operator forbids.
 
+### 4.5 Violation actions
+
+Per [overview.md](./overview.md) §8.1, `onViolation` decides what happens when §4.2 refuses an access:
+
+| Action | Result |
+| --- | --- |
+| `deny` (default) | The access fails with `EACCES` / `EROFS` per §8. The process keeps running and may handle the error. |
+| `kill` | The **offending process** is terminated. Enforcement sits on the syscall/VFS path and therefore knows its caller exactly, so the termination is precise. |
+
+1. `kill` is the right choice for a deployment that treats a touch of a credential path as disqualifying rather than as a recoverable error: a process that tried to read `~/.aws/credentials` has already told the operator what it is doing, and letting it continue only gives it more attempts.
+2. `deny` remains the default because a great many benign programs probe paths they do not need — configuration lookups walk a list of candidate locations, and a build tool may stat directories that do not concern it. Under `kill` those probes become process deaths, which is why the aggressive value is opt-in.
+3. There is no `warn`, on the terms of [overview.md](./overview.md) §8.1.2. To learn what a stricter path set *would* refuse without refusing it, use `auditTier` (§6.6) — which, unlike a `warn`, keeps the current rules enforced.
+4. `onViolation` applies to the baseline deny set and to explicitly declared rules alike. It does not apply to the host-boundary check in §4.4, which is a create-time rejection with no process to act on.
+5. Either action emits a violation event, at every audit level (§9).
+
 ## 5. Field specification and constraints
 
 | Field | Type | Constraints | Default | Semantics |
@@ -92,6 +109,8 @@ For any filesystem access by any sandbox process, the decision MUST be:
 | `readOnlyPaths` | `[string]?` | Pattern syntax §3. MUST be empty when `writableRoots` is non-empty. | `[]` | Reads allowed; writes/create/delete denied. |
 | `writableRoots` | `[string]?` | Pattern syntax §3. MUST be empty when `readOnlyPaths` is non-empty. | `[]` | When non-empty, writes allowed only under these roots (plus §6.4). |
 | `implicitRuntimeWritable` | `bool?` | — | `true` | Whether the runtime-writable set applies when `writableRoots` is non-empty (§6.4). |
+| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.5. |
+| `audit` | `enum?` | `none` \| `metadata` | `none` | Audit level for **ordinary** filesystem activity (§9). It does not suppress violation events ([overview.md](./overview.md) §8.1.4). |
 | `mounts.allowedHostPrefixes` | `[string]?` | Absolute host paths, no wildcards. | operator config | Which host paths may be mounted into this sandbox. |
 | `mounts.defaultReadOnly` | `bool?` | — | `false` | Default writability of mounts without explicit mode. |
 
@@ -169,8 +188,12 @@ Which defaults apply is selected by `policy.tier` ([overview.md](./overview.md) 
 | `mode` | `baseline` | `baseline` |
 | `baselineVersion` | platform default | platform default |
 | `mounts.defaultReadOnly` | `false` | `true` |
+| `onViolation` | `deny` | `deny` |
+| `audit` | `none` | `metadata` |
 
 Note that `baseline` and `restricted` share `mode: baseline`. That is deliberate and is one of only two places in the proposal where a module's `baseline` tier is not byte-for-byte today's behavior ([overview.md](./overview.md) §9): the sensitive-path deny set is on at the default tier, because a credential path a legitimate workload never reads is not a compatibility surface worth preserving. A deployment that disagrees pins `baselineExceptions` or sets `mode: unrestricted`, both of which are recorded and audited (§6.3.4).
+
+`onViolation` is `deny` under both tiers, per [overview.md](./overview.md) §8.1.7 — and here the reason is especially concrete: benign path probing is common enough (§4.5.2) that a tier which selected `kill` would turn ordinary configuration lookups into process deaths.
 
 `tier: restricted` changes one field: mounts arrive read-only unless the mount request asks for write. It does not narrow the in-sandbox path rules, because there is no useful guess to make — a restricted tier that turned on `writableRoots` would have to invent the root, and inventing `/workspace` for an image that builds in `/src` is the confusing-build-failure outcome §6.4 exists to avoid.
 
@@ -194,6 +217,8 @@ On top of [overview.md](./overview.md) §5:
 | `denyPaths` | Append + deduplicate (including baseline set when active). |
 | `readOnlyPaths` / `writableRoots` | Append + deduplicate. The mutual-exclusion constraint is validated on the **merged** result, not per source. |
 | `implicitRuntimeWritable` | `false` wins (most restrictive). |
+| `onViolation` | `kill` wins ([overview.md](./overview.md) §8.1.7). |
+| `audit` | Most detailed wins (`metadata` > `none`). |
 | `mounts.allowedHostPrefixes` | Intersection across sources (mount surface can only narrow, never widen). |
 | `mounts.defaultReadOnly` | `true` wins (most restrictive). |
 
@@ -225,13 +250,17 @@ Enforcement errors are OS-level, not API-level, because the policy applies below
 | Create/delete/rename under read-only | `EACCES` |
 | Directory listing of a denied directory | `EACCES` |
 
-Denials MUST NOT be distinguishable from ordinary permission failures in a way that leaks the rule identity to the sandbox process (no error-channel oracle); rule identity appears only in the audit stream (§9).
+Under `onViolation: kill` (§4.5) the offending process is terminated instead of receiving any of the above.
+
+Denials MUST NOT be distinguishable from ordinary permission failures in a way that leaks the rule identity to the sandbox process (no error-channel oracle); rule identity appears only in the audit stream (§9). `kill` does not breach this — a terminated process learns nothing — and the residual sibling-process signal is the accepted trade recorded in [overview.md](./overview.md) §8.1.5.
 
 ## 9. Observability
 
-1. Filesystem denials SHOULD be reported as audit events with `{sandboxID, rule (pattern), path, op (read|write|...), outcome: denied}` at the module's configured audit level; `mode: unrestricted` disables baseline-set events but not explicit `denyPaths` events.
-2. Audit payloads MUST NOT include file contents.
-3. Each effective `baselineExceptions` entry MUST emit an audit event at sandbox creation with `{sandboxID, baselineVersion, exception, sources}` (§6.3.4). Weakening the baseline is an event, not a silent field.
+1. Every filesystem denial MUST be emitted as a violation event with `{sandboxID, rule (pattern), path, op (read|write|...), outcome: denied|killed, effectivePolicyVersion, shadow: false}`, at **every** audit level including `audit: none` ([overview.md](./overview.md) §8.1.4). `mode: unrestricted` removes the baseline set from evaluation, so it produces no baseline-set events — there is no denial to report — but it does not suppress events for explicitly declared `denyPaths`.
+2. What `audit: metadata` adds is the record of **ordinary** access activity. That is the part a deployment may reasonably decline, and the part §8.1.4 leaves under this field's control.
+3. Audit payloads MUST NOT include file contents.
+4. Each effective `baselineExceptions` entry MUST emit an audit event at sandbox creation with `{sandboxID, baselineVersion, exception, sources}` (§6.3.4), independent of the audit level. Weakening the baseline is an event, not a silent field.
+5. Denials of the same `{rule, op}` repeat readily — a configuration lookup walking candidate paths can produce many in a burst. Implementations **SHOULD** aggregate them on the same terms as shadow findings (§6.6), rather than emitting one event per access.
 
 ## 10. Open questions
 

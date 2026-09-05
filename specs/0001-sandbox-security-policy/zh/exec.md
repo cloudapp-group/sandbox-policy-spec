@@ -199,7 +199,17 @@ exec:
 
 非致命发现以 `policyWarnings` 数组随创建/更新响应返回；警告绝不改变请求的结果。已定义的警告：`interpreter_admitted`（§3.6.2）。
 
-审计事件（`audit: metadata`）：`{sandboxID, user, command, effectiveTimeoutSec, exitCode, outcome: allowed|denied, rule?}`。`full` 额外附带上限字节数的 stdout/stderr 摘要。`none` 不输出任何事件。审计事件**不得**输出到沙箱内部。
+审计事件（`audit: metadata`）：`{sandboxID, user, command, effectiveTimeoutSec, exitCode, outcome: allowed|denied, rule?}`。`full` 额外附带上限字节数的 stdout/stderr 摘要。审计事件**不得**输出到沙箱内部。
+
+依 [overview.md](./overview.md) §8.1.4，一次**被拒绝**的执行在任何审计级别下都产生违规事件，包括 `audit: none`：`{sandboxID, user, command, rule, subCommand, mode, outcome: denied, effectivePolicyVersion, shadow: false}`。`audit: none` 压掉的是那些*被放行*执行的记录 —— 也就是普通活动。本模块正是这个区分代价最小的地方：这里的一次拒绝本来就是一个结构化的 `400` 返回给调用方，所以该事件重复的是调用方已经拿到的信息，它的价值在于读取审计流的运维，而不在于那个被拒的 Agent。
+
+### 7.1 没有违规动作
+
+依 [overview.md](./overview.md) §8.1.6，本模块声明自己的立场：**它没有 `onViolation` 字段。**
+
+它的强制执行点是控制接口，所以违规是在进程*存在之前*被抓住的。没有东西可杀 —— §4.2 的全部要点就是那条命令从未运行 —— 而 `deny` 是唯一讲得通的结果。一个只有一种合法取值的字段比没有字段更糟，因为它暗示还存在第二种取值。
+
+这同时也是"为什么 `kill` 并非普遍可用"（[overview.md](./overview.md) §8.1.3）最干净的一个例证：一个模块在违规时能采取的动作，被它在哪里强制执行所限定。`exec` 坐得足够早，因此拒绝是彻底的 —— 而这恰恰也是 §3.6 反复强调"它的拒绝覆盖面如此之小"的原因。
 
 ## 8. 合并语义
 

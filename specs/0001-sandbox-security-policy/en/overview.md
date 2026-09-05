@@ -184,6 +184,7 @@ When more than one policy source is present, the effective policy is computed on
 | List fields (`allowOut`, `denyPaths`, ...) | Higher-precedence entries are appended to lower-precedence entries, then deduplicated. |
 | Rule lists (`rules`, exec command rules) | Higher-precedence rules sort **before** lower-precedence rules; evaluation is first-match-wins. |
 | Mode fields (`exec.mode`, `filesystem.mode`, `process.mode`, `process.syscall.mode`) | The most restrictive mode wins. |
+| Violation actions (`onViolation`, `onExceeded`) | The most severe action wins (§8.1.7, [resource.md](./resource.md) §10). |
 | **Narrow-only restrictions** | A restriction contributed by a lower-precedence source MUST NOT be removable, overridable, or punched through by a higher-precedence source. Higher precedence may narrow the boundary; it may never widen it. Module specs name the fields this governs — network binding denies and `allowInternetAccess`, `exec.allowedUsers`, `filesystem.mounts.allowedHostPrefixes` and `filesystem.baselineExceptions`, `process.noNewPrivileges` and `process.allowedCapabilities`, `resource.limits`. The single, bounded exception is a time-bounded grant (§5.1). |
 
 Where a higher-precedence source asks for something the narrow-only rule forbids, the module spec MUST specify one of two outcomes and never a silent third: reject the request (`400`, for a direct contradiction such as flipping a boolean), or accept the request and report the ineffective part in a `policyWarnings` array on the response (for an entry that is merely shadowed).
@@ -316,6 +317,72 @@ Shadow evaluation is deliberately **not** a general dry-run of an arbitrary poli
 - Policy **enforcement** errors are reported to the operation that was denied, as structured errors carrying the matched rule name or exhausted dimension. Exceptions: filesystem and process enforcement surface as standard OS error codes (`EACCES`/`EROFS`, `EPERM`) because they apply below the API layer.
 - Every module defines its error codes and their payloads in its spec.
 
+### 8.1 Violation response model
+
+§8 says how a denial is *reported*. It does not say what the platform *does* about it, and until now each module answered that separately: `process` had a configurable `syscall.onViolation`, `resource` had `onExceeded`, and `network`, `filesystem`, and the rest of `process` had a hard-coded outcome with no field at all. This section is the shared model.
+
+#### 8.1.1 Two kinds of event, deliberately not merged
+
+| | Meaning | Field | Actions |
+| --- | --- | --- | --- |
+| **Violation** | The workload crossed a boundary it was told not to cross. | `onViolation` | `deny`, `kill` |
+| **Exceedance** | The workload stayed inside its boundaries and ran out of budget. | `onExceeded` ([resource.md](./resource.md) §6) | `warn`, `pause`, `hold`, `kill` |
+
+These stay two words with two action sets, and the reason is not history. A violation is a statement about intent — nothing legitimate needed that path, that destination, that syscall — so the only sensible responses are refusing it and ending the process that asked. An exceedance says nothing about intent; a workload that used its whole token budget did exactly what it was permitted to do, just more of it. That is why `hold` (suspend and ask a human) makes sense for one and not the other: there is something for a human to decide about "needs more budget", and nothing to decide about "tried to read `/etc/shadow`".
+
+#### 8.1.2 There is no `warn` for violations, and that is the important part
+
+`onViolation` MUST NOT accept a `warn`-style action — detect, report, and allow. Such an action is a switch that turns a protection off while leaving it configured, which is the single most misleading state a security policy can be in.
+
+The capability people reach for `warn` to get already exists and is strictly better: shadow evaluation (§7.2). The difference is where the observation happens.
+
+| | What is enforced | What is observed |
+| --- | --- | --- |
+| A hypothetical `onViolation: warn` | **Nothing** — the rule is off | The rule that is off |
+| `auditTier` (§7.2) | The current tier, fully | A **stricter** tier, in parallel |
+
+Shadow evaluation lowers no protection; `warn` lowers exactly the protection it names. An operator who wants "tell me what this rule would block, without blocking it" wants a shadow of a stricter tier, not a disabled rule reported as if it were active. This is recorded here rather than in each module because the question — "resource has `warn`, why don't we?" — will be asked of every module, and the answer is the same one every time.
+
+#### 8.1.3 What `kill` terminates is not uniform
+
+`kill` ends something, but *what* it ends depends on where the module enforces, and the difference is load-bearing rather than incidental:
+
+| Module | `deny` surfaces as | `kill` terminates | Why that granularity |
+| --- | --- | --- | --- |
+| **network** | Connection failure (TCP reset / drop) | The **sandbox** | L3/L4 enforcement sees packets, not process identity. Attributing a connection to a process is unreliable at that layer, and a best-effort attribution would kill the wrong process — worse than not killing at all. |
+| **filesystem** | `EACCES` / `EROFS` | The offending **process** | Enforcement sits on the syscall/VFS path, which knows its caller exactly. |
+| **process** | `EPERM` / OS-level failure | The offending **process** | Same. |
+| **exec** | `POLICY_EXEC_DENIED` (`400`) | *not applicable* — see §8.1.6 | |
+| **resource** | *not applicable* — `onExceeded` instead | The sandbox | Consumption is a sandbox-level quantity; there is no single guilty process. |
+
+The asymmetry in the first row MUST be stated in `network`'s own spec rather than left to a reader of this table: `onViolation: kill` is a blunter instrument there than anywhere else, and a deployment that sets it should know it is choosing "one bad connection ends the sandbox".
+
+#### 8.1.4 Violations are always audited
+
+A violation event MUST be emitted regardless of a module's `audit` field. A module's `audit` level governs the recording of **ordinary operations**; it MUST NOT be able to suppress the record of a denial.
+
+This is a change in the reading of `audit: none`, and it is deliberate. Under the previous reading, a `baseline`-tier sandbox — the default — would refuse a read of `~/.aws/credentials` and leave **no trace of it anywhere**. That cannot be squared with principle 4: a denial that is explainable in principle and invisible in practice is not explainable. The audit level decides how much is recorded about what the workload did; it does not decide whether the platform admits to having stopped it.
+
+Every violation event MUST carry: the module, the matched rule or field, the action taken (`denied` or `killed`), the `effectivePolicyVersion` in force (§4.1.6), and `shadow: false` — the last so that real violations and shadow findings (§7.2.3) share one schema and are told apart by a field rather than by which stream they arrived on.
+
+#### 8.1.5 The side channel `kill` opens, and why it is accepted
+
+Every module forbids leaking rule identity to the workload through the error channel ([process.md](./process.md) §4.5.5, [filesystem.md](./filesystem.md) §8). `kill` does not violate that rule — a terminated process learns nothing — but it does move the signal: a *sibling* process can observe that its peer disappeared and infer where the boundary is.
+
+This is accepted rather than solved, for two reasons. The inference costs the workload one process per probe, which makes mapping a policy expensive and noisy in the audit stream. And `deny` is the default everywhere, so a deployment only takes this trade when it has decided that a process which crossed the line should not continue.
+
+#### 8.1.6 Modules that have no `onViolation`, and why
+
+Per the same rule as grantable fields (§5.1.8) and shadow support (§7.2.5), a module states its position either way; silence is a spec defect.
+
+- **`exec`** has no `onViolation`. Its enforcement point is the control interface, so a violation is caught *before* the process exists: there is nothing to kill, and the denial is already a structured `400` to the caller rather than something the sandbox experiences. `deny` is the only coherent action, so it is not a field.
+- **`resource`** has no `onViolation`. It has `onExceeded` instead, per §8.1.1, and adding both would put two fields on one module for two things a reader would reasonably expect to be one.
+
+#### 8.1.7 Merge and tier
+
+- `onViolation` merges as **most severe wins**: `kill` > `deny`, from any source. This is the existing rule for `syscall.onViolation` ([process.md](./process.md) §7), applied uniformly.
+- **No tier changes `onViolation`.** Both `baseline` and `restricted` resolve to `deny`. This is the §7.1 restraint applied honestly: `deny` versus `kill` is not a question of how strict a deployment wants to be, it is a question of whether a process that crossed the line should be allowed to keep running — and only the deployment knows whether its workload can survive that. Unlike `restricted`'s other expansions, the failure here is neither immediate nor legible: a killed process surfaces as a partial result or a hung task, far from the policy that caused it. `resource`'s `onExceeded: hold` is a tier default precisely because `hold` is safe and reversible; `kill` is neither.
+
 ## 9. Compatibility
 
 - **E2B parity:** the E2B-compatible surface (`allow_internet_access`, `network{}`) is untouched. Requests without `policy` behave exactly as today; internally they are normalized to the default policy, which becomes the single representation downstream (principle 6).
@@ -324,6 +391,7 @@ Shadow evaluation is deliberately **not** a general dry-run of an arbitrary poli
 - **Tiers:** an absent `tier` resolves to `baseline`, whose expansion is today's behavior for `network`, `exec`, and `resource`. `filesystem` and `process` baselines additionally deny things no compatible workload should depend on — credential paths and escape-adjacent system calls. Those two are the deliberate, documented exceptions to "zero behavior change", and both are versioned sets (`baseline/1`, `syscall/1`) so the exception is inspectable and pinnable rather than rolling.
 - **Tier versions:** an absent `tierVersion` resolves to the platform default, recorded in the effective policy. Since a new tier version may only tighten (§7.1.7), pinning is how a deployment declines a future tightening — not how it obtains today's behavior, which it already has.
 - **Shadow evaluation:** an absent `auditTier` means no shadow evaluation and no shadow events. When present it changes no outcome by construction (§7.2.1), so it is compatible by definition. It is also the supported way to de-risk the two exceptions above: shadow the stricter tier, read what it would have denied, then adopt it.
+- **Violation actions:** an absent `onViolation` resolves to `deny` in every module, which is each module's existing hard-coded behavior. No workload changes. The one visible change is §8.1.4: denials now produce audit events even at `audit: none`. That adds events to the audit stream where there were none — a new output, not a new denial — and no sandbox behaves differently because of it.
 - **SDKs:** minor versions add a `policy=` parameter and typed policy errors; existing signatures are unchanged.
 - **Migration:** a mapping from every legacy field to its policy location is defined in [network.md](./network.md) §8.
 
@@ -334,7 +402,7 @@ Each phase is independently valuable and shippable.
 | Phase | Scope |
 | --- | --- |
 | **0** | This proposal set reviewed in a tracking issue; open questions triaged into decisions. |
-| **1** | `SandboxPolicy` API model; legacy-field normalization; `policy.network` end-to-end; conflict detection; effective-policy versioning and snapshots (§4.1); SDK `policy=`. |
+| **1** | `SandboxPolicy` API model; legacy-field normalization; `policy.network` end-to-end; conflict detection; effective-policy versioning and snapshots (§4.1); the violation response model and its always-on violation events (§8.1); SDK `policy=`. |
 | **2** | Resource: quota merge, windowed limits (`minute`–`month` + `lifetime`), `onExceeded` actions (`warn`/`pause`/`hold`/`kill`), notifications and webhook, hold approval API, usage exposure. |
 | **3** | Filesystem: baseline sensitive-path protection, `readOnlyPaths` / `denyPaths` / `writableRoots`, host-mount policy surface. |
 | **4** | Exec: modes, user restriction, timeout ceiling, concurrency, audit, typed denials. |
@@ -349,7 +417,7 @@ One ordering tension is worth naming rather than discovering during rollout: sha
 
 1. **Profile scope and authority over policy content.** Cluster-global, per-namespace, or per-template? Who may create profiles? Two adjacent questions belong here rather than in separate entries, because all three are about authority rather than mechanism: (a) should a deployment be able to constrain what a policy may *say* — "no template in this namespace may set `tier: unrestricted`", the role Kubernetes gives admission constraints — which is a different axis from the merge rules in §5, since narrow-only governs how sources combine, not what any single source is allowed to write; and (b) should quotas and limits be expressible in aggregate across a tenant's sandboxes, rather than only per sandbox as [resource.md](./resource.md) defines them today.
 2. **Hot updates.** Which modules support `PATCH /sandboxes/{id}/policy` at runtime, and what are the semantics for already-running processes and connections? Identity, versioning and snapshot semantics are settled (§4.1); what remains open is per-module runtime re-application. Note that grant issuance and expiry are themselves policy changes (§5.1.5): a module that cannot re-apply policy at runtime cannot accept grants, and MUST say so.
-3. **Audit unification.** Should denials across all modules share one event schema and sink, so operators get a single audit stream? (Whatever the answer, every denial event carries `effectivePolicyVersion` per §4.1.6.) This is also the interface the out-of-scope detection subsystem consumes (§2.3.1), which raises the bar on getting it uniform.
+3. **Audit unification.** Should denials across all modules share one event schema and sink, so operators get a single audit stream? (Whatever the answer, every denial event carries `effectivePolicyVersion` per §4.1.6.) This is also the interface the out-of-scope detection subsystem consumes (§2.3.1), which raises the bar on getting it uniform. §8.1.4 settles part of this — violation events are mandatory and carry a fixed minimum payload — but the sink, the transport, and whether all five modules use literally one schema remain open.
 4. **Tier extensibility.** The graded-levels question formerly open here is settled by §7.1. What remains: may a deployment define additional named tiers, or is the three-value set closed? A deployment-defined tier would need its own versioning and announcement story (§7.1.6), and now also its own published expansion version (§7.1.7). A concrete candidate is a tier stricter than `restricted` that *does* require an `exec` allowlist and named `filesystem.writableRoots` — the values §7.1 refuses to guess. Such a tier is only coherent if it is legitimate for a tier to be unusable without accompanying fields, which is the question to answer first. §7.2 removes the second obstacle it faced: an operator can now shadow such a tier before adopting it, so the objection "nobody can tell whether it would break them" no longer stands on its own.
 5. **Snapshot interaction.** When a sandbox is cloned or restored from a snapshot, which parts of the effective policy and of the accumulated usage travel with it? Active grants included: dropping them is the safe answer, since inheriting a grant whose originating task no longer exists is a silent widening.
 6. **Grant authority.** Which principals may issue grants — sandbox owner, namespace operator, both? Should the maximum TTL vary by tier (shorter under `restricted`), and should some fields be permanently non-grantable regardless of the ceiling?
@@ -359,6 +427,7 @@ One ordering tension is worth naming rather than discovering during rollout: sha
 10. **Composing profiles.** A sandbox references at most one profile (§4). A cloud security group is composable — an instance carries several, and the effective rule set is their combination — which is how "base lockdown" and "may reach GitHub" stay separate, reusable objects instead of being copied into every profile that needs both. Should a sandbox reference several profiles? The merge rule would have to be stated carefully, because profiles are *peers* with no precedence between them: allow-type lists would union, deny-type lists would union and every one of them would be binding (§4.6 of [network.md](./network.md)), modes and scalars would take the most restrictive value, and the intersection fields (`allowedCapabilities`, `syscall.allowedSyscalls`, `baselineExceptions`) would intersect. Note this is deliberately *not* the security-group rule, which unions allows and has no denies at all; unioning allows across peers here would let a permissive profile widen a strict one, which §5 forbids.
 11. **Identity-based egress targets.** Every egress target is an address, a CIDR, or a name that resolves to one (§2.1 of [network.md](./network.md)). A security group can instead name *another security group* as the peer, and a Kubernetes NetworkPolicy can select pods by label — identity-based microsegmentation, which survives address reassignment and expresses "these workloads may talk to each other" without anyone writing a CIDR. The multi-agent case wants exactly this: two sandboxes cooperating on one task. Two obstacles have to be cleared first. There is no sandbox grouping concept to point at, and sandbox-to-sandbox traffic rides on the very ranges §4.2 of [network.md](./network.md) denies unconditionally with "user policy MUST NOT be able to allow these ranges" — so support would require a platform-resolved exception that users cannot hand-write, which is the one place in this proposal where an unconditional deny would gain a hole. Worth doing, not worth doing cheaply.
 12. **Simulating a candidate policy.** §7.2 shadows a *tier*, deliberately, because a tier is one value with a published expansion. It does not answer "what would this policy I am about to write do?" — the question a security group's `DryRun` and a reachability analyzer answer. With five modules, tier expansion, provenance, binding denies, shadowing warnings, and grants all composing, an author cannot currently predict the effective result except by creating a sandbox. Should there be a read-only `POST /policies:simulate` returning the fully expanded effective policy, and a `POST /sandboxes/{id}/policy:explain` returning the verdict, matched rule, and contributing source for a hypothetical operation? Both are read-only and change no semantics, which makes this a question of scope rather than of risk.
+13. **Escalation on repeated violation.** §8.1 gives each violation an independent verdict: the hundredth attempt to read `~/.aws/credentials` is answered exactly like the first. Repetition is one of the strongest signals available — a legitimate workload does not retry a credential path in a loop — and nothing in the policy object can currently express "after N of these, stop being polite". A field would be shaped roughly as `onRepeatedViolation: {count, withinSec, action}`. Two objections keep it out of v1. A threshold is a value nobody can choose correctly in advance, which is the same trap §7.1 refuses to walk into for `writableRoots` and every `resource` budget; and "this pattern of behaviour is an attack" is a verdict produced by observing behaviour over time, which §2.3.1 places outside every module in this proposal. The consistent position is therefore that the audit stream carries the repetitions and a detection subsystem escalates by updating the policy — versioned and snapshotted like any other change. What has to be decided is whether that indirection is acceptable, or whether repeated-violation escalation is the one behavioural judgement cheap enough and unambiguous enough to belong in the policy object after all.
 
 ## 12. Non-normative notes
 

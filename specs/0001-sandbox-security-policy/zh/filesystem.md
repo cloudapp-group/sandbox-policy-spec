@@ -27,6 +27,8 @@ policy:
     readOnlyPaths:   [string]                  # 允许读、禁止写
     writableRoots:   [string]                  # 反向表述：仅这些根下可写
     implicitRuntimeWritable: bool              # 默认: true
+    onViolation:     deny | kill               # 默认: deny
+    audit:           none | metadata           # 默认: none
     mounts:
       allowedHostPrefixes: [string]            # 可挂载的宿主路径
       defaultReadOnly:     bool                # 默认: false
@@ -81,6 +83,21 @@ policy:
 3. 前缀校验**必须**在匹配前解析 `..`（路径穿越尝试被拒绝）。
 4. 集群侧运维白名单仍是**兜底约束**：生效的 `allowedHostPrefixes` **必须**是策略声明前缀与运维配置前缀的交集。策略不能放宽运维所禁止的范围。
 
+### 4.5 违规动作
+
+依 [overview.md](./overview.md) §8.1，`onViolation` 决定当 §4.2 拒绝一次访问时会发生什么：
+
+| 动作 | 结果 |
+| --- | --- |
+| `deny`（默认） | 该访问按 §8 以 `EACCES` / `EROFS` 失败。进程继续运行，并可以自己处理这个错误。 |
+| `kill` | 终止**那个违规进程**。强制执行点位于系统调用/VFS 路径上，因此它精确地知道自己的调用者，终止是精准的。 |
+
+1. 对于那种把"碰一下凭据路径"视为直接取消资格、而非一个可恢复错误的部署，`kill` 是对的选择：一个试图读 `~/.aws/credentials` 的进程已经把自己在做什么告诉运维了，而让它继续跑只是多给它几次机会。
+2. `deny` 仍是默认值，因为大量无恶意的程序会去探测自己并不需要的路径 —— 配置查找会遍历一串候选位置，而一个构建工具可能会 stat 一些与它无关的目录。在 `kill` 之下这些探测会变成进程死亡，这正是那个更激进的取值要由用户主动选择的原因。
+3. 没有 `warn`，理由见 [overview.md](./overview.md) §8.1.2。要在不拒绝的前提下弄清一套更严的路径集*本来会*拒绝什么，用 `auditTier`（§6.6）—— 与 `warn` 不同，它让当前规则保持强制。
+4. `onViolation` 对基线拒绝集合与显式声明的规则同等适用。它不适用于 §4.4 的宿主边界检查，那是一次创建时拒绝，没有进程可供施加动作。
+5. 两种动作都会产生违规事件，且在任何审计级别下都产生（§9）。
+
 ## 5. 字段规格与约束
 
 | 字段 | 类型 | 约束 | 默认值 | 语义 |
@@ -92,6 +109,8 @@ policy:
 | `readOnlyPaths` | `[string]?` | 模式语法 §3。`writableRoots` 非空时**必须**为空。 | `[]` | 允许读；写/创建/删除被拒绝。 |
 | `writableRoots` | `[string]?` | 模式语法 §3。`readOnlyPaths` 非空时**必须**为空。 | `[]` | 非空时，仅这些根之下允许写（加 §6.4）。 |
 | `implicitRuntimeWritable` | `bool?` | — | `true` | `writableRoots` 非空时运行时可写集合是否生效（§6.4）。 |
+| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.5。 |
+| `audit` | `enum?` | `none` \| `metadata` | `none` | **普通**文件系统活动的审计级别（§9）。它不压制违规事件（[overview.md](./overview.md) §8.1.4）。 |
 | `mounts.allowedHostPrefixes` | `[string]?` | 宿主绝对路径，不允许通配。 | 运维配置 | 哪些宿主路径可挂载进该沙箱。 |
 | `mounts.defaultReadOnly` | `bool?` | — | `false` | 未显式指定模式的挂载的默认可写性。 |
 
@@ -169,8 +188,12 @@ denyPaths:
 | `mode` | `baseline` | `baseline` |
 | `baselineVersion` | 平台默认值 | 平台默认值 |
 | `mounts.defaultReadOnly` | `false` | `true` |
+| `onViolation` | `deny` | `deny` |
+| `audit` | `none` | `metadata` |
 
 注意 `baseline` 与 `restricted` 共用 `mode: baseline`。这是刻意的，也是整份提案中仅有两处「某模块的 `baseline` 分级并非逐字节等于今天行为」的地方之一（[overview.md](./overview.md) §9）：敏感路径拒绝集在默认分级下就是开着的，因为一条正当工作负载从不读取的凭据路径，不是一个值得保留的兼容性面。不同意的部署可以固定 `baselineExceptions` 或设置 `mode: unrestricted`，两者都会被记录并审计（§6.3.4）。
+
+`onViolation` 在两个分级下都是 `deny`，依 [overview.md](./overview.md) §8.1.7 —— 而在这里理由格外具体：无恶意的路径探测足够常见（§4.5.2），一个选了 `kill` 的分级会把普通的配置查找变成进程死亡。
 
 `tier: restricted` 只改一个字段：挂载除非明确请求写，否则以只读到达。它**不**收窄沙箱内的路径规则，因为没有任何有用的猜测可做 —— 一个打开 `writableRoots` 的受限分级不得不发明出那个根，而为一个在 `/src` 里构建的镜像发明 `/workspace`，正是 §6.4 存在所要避免的那种令人困惑的构建失败。
 
@@ -194,6 +217,8 @@ denyPaths:
 | `denyPaths` | 追加 + 去重（含生效中的基线集合）。 |
 | `readOnlyPaths` / `writableRoots` | 追加 + 去重。互斥约束在**合并后**的结果上校验，而非逐来源校验。 |
 | `implicitRuntimeWritable` | `false` 胜（最严格）。 |
+| `onViolation` | `kill` 胜出（[overview.md](./overview.md) §8.1.7）。 |
+| `audit` | 更详细者胜出（`metadata` > `none`）。 |
 | `mounts.allowedHostPrefixes` | 各来源取交集（挂载面只能收窄，不能放宽）。 |
 | `mounts.defaultReadOnly` | `true` 胜（最严格）。 |
 
@@ -225,13 +250,17 @@ denyPaths:
 | 在只读之下创建/删除/重命名 | `EACCES` |
 | 列出被拒目录 | `EACCES` |
 
-拒绝**不得**以某种可区别于普通权限失败的方式向沙箱进程泄露规则身份（不得存在错误侧信道）；规则身份只出现在审计流（§9）中。
+在 `onViolation: kill`（§4.5）之下，那个违规进程被终止，而不会收到上表中的任何一项。
+
+拒绝**不得**以某种可区别于普通权限失败的方式向沙箱进程泄露规则身份（不得存在错误侧信道）；规则身份只出现在审计流（§9）中。`kill` 不违反这一条 —— 一个被终止的进程什么也学不到 —— 而留给兄弟进程的那点残余信号，是 [overview.md](./overview.md) §8.1.5 记录下的、被接受的取舍。
 
 ## 9. 可观测性
 
-1. 文件系统拒绝**应该**以配置的审计级别输出审计事件 `{sandboxID, rule (模式), path, op (read|write|...), outcome: denied}`；`mode: unrestricted` 关闭基线集合事件，但不关闭显式 `denyPaths` 事件。
-2. 审计载荷**不得**包含文件内容。
-3. 每一条生效的 `baselineExceptions` 条目**必须**在沙箱创建时发出审计事件 `{sandboxID, baselineVersion, exception, sources}`（§6.3.4）。削弱基线是一个事件，而不是一个静默的字段。
+1. 每一次文件系统拒绝都**必须**作为违规事件输出 `{sandboxID, rule (模式), path, op (read|write|...), outcome: denied|killed, effectivePolicyVersion, shadow: false}`，且在**任何**审计级别下都输出，包括 `audit: none`（[overview.md](./overview.md) §8.1.4）。`mode: unrestricted` 把基线集合从求值中移除，因此它不产生基线集合事件 —— 那里本来就没有拒绝可报 —— 但它不压制显式声明的 `denyPaths` 的事件。
+2. `audit: metadata` 所增加的是对**普通**访问活动的记录。那是一个部署可能合理地不想要的部分，也是 §8.1.4 留在本字段掌控之下的部分。
+3. 审计载荷**不得**包含文件内容。
+4. 每一个生效的 `baselineExceptions` 条目**必须**在沙箱创建时输出审计事件 `{sandboxID, baselineVersion, exception, sources}`（§6.3.4），且与审计级别无关。削弱基线是一个事件，而不是一个沉默的字段。
+5. 相同 `{rule, op}` 的拒绝很容易重复 —— 一次遍历候选路径的配置查找就能在很短时间内产生一批。实现**应该**按与影子发现相同的条件（§6.6）聚合它们，而不是每次访问发一条事件。
 
 ## 10. 开放问题
 

@@ -25,6 +25,8 @@ policy:
     denyOut:       [string]            # IPv4 / IPv4 CIDR only
     portRules:     [PortRule]          # L4 allow rules scoped by protocol and port
     rules:         [EgressRule]        # L7 rules, first-match-wins (existing grammar)
+    onViolation:   deny | kill         # default: deny — see §4.8
+    audit:         none | metadata     # default: none
     ingress:
       allowPublicTraffic: bool         # default: true
       maskRequestHost:   string        # Host authority template, "${PORT}" expansion
@@ -57,6 +59,8 @@ An `allowOut` entry admits its target on **every** port. That is the right shape
 | `denyOut` | `[string]?` | Each entry: IPv4 or IPv4 CIDR. Domain names MUST be rejected with `400 INVALID_POLICY`. | `[]` | Explicitly denied egress destinations. |
 | `portRules` | `[PortRule]?` | Per §2.1. `name` MUST be unique within the list. | `[]` | Port- and protocol-scoped allow rules. |
 | `rules` | `[EgressRule]?` | Per the existing L7 rule grammar: `name`, `match.{scheme,sni,host,method,path}`, `action.{allow,audit,inject}`. | `[]` | L7 HTTP/HTTPS rules, first-match-wins. |
+| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.8. Note `kill` ends the **sandbox**, not a process. |
+| `audit` | `enum?` | `none` \| `metadata` | `none` | Audit level for **ordinary** connection activity (§7). It does not suppress violation events ([overview.md](./overview.md) §8.1.4). |
 | `ingress.allowPublicTraffic` | `bool?` | — | `true` | When `false`, inbound public access requires a valid traffic-access token. |
 | `ingress.maskRequestHost` | `string?` | Host authority template; `${PORT}` expands to the requested sandbox port. | unset | Rewrites the Host authority forwarded to sandbox services. Ingress-only. |
 
@@ -102,6 +106,23 @@ Every rule in §4 describes a **connection**, not an individual packet. The dist
 
 This is written down rather than left to the data path because it is the property that makes a rule set reviewable. Under a stateless model every `allowOut` entry would need a companion reverse entry covering the ephemeral port range — which is simultaneously the thing every author forgets and, once written, a hole far wider than the rule it was meant to serve. Cloud security groups are stateful for exactly this reason, and this spec inherits the expectation along with the grammar (§1).
 
+### 4.8 Violation actions
+
+Per [overview.md](./overview.md) §8.1, `onViolation` decides what happens when §4.1 rejects a connection:
+
+| Action | Result |
+| --- | --- |
+| `deny` (default) | The connection fails as it does today: a `ECONNREFUSED`-class TCP reset for rejected TCP, a drop otherwise (§7). |
+| `kill` | The **sandbox** is terminated. |
+
+The granularity in the second row is the point of this section, and it is a limitation rather than a design preference:
+
+1. **`kill` here ends the sandbox, not the offending process.** L3/L4 enforcement operates on packets. By the time a connection is rejected, the process that opened the socket is not reliably knowable at that layer — and a best-effort attribution is worse than none, because it would terminate whichever process the guess landed on. Ending the sandbox is the only action this enforcement point can take honestly.
+2. **A deployment setting `kill` is therefore choosing "one rejected connection ends the sandbox".** That is a legitimate posture for a workload that should never reach an unnamed destination, and a destructive one for anything that probes. It MUST NOT be selected on the assumption that it behaves like `filesystem`'s or `process`'s `kill`, which are process-scoped ([overview.md](./overview.md) §8.1.3).
+3. **The built-in private-CIDR denies (§4.2) participate.** Under `kill`, a connection attempt to `169.254.169.254` ends the sandbox. This is the case `kill` is most defensible for — nothing legitimate reaches the metadata endpoint — and it is also the case most likely to fire unexpectedly, since some runtimes probe such addresses on startup. Shadow the tier first (§6.1).
+4. There is no `warn`, on the terms of [overview.md](./overview.md) §8.1.2. `auditTier` (§6.1) is how a deployment learns which destinations a stricter posture would reject, while keeping the current rules enforced.
+5. Either action emits a violation event, at every audit level (§7).
+
 ## 5. Merge semantics
 
 On top of the shared rules in [overview.md](./overview.md) §5:
@@ -112,6 +133,8 @@ On top of the shared rules in [overview.md](./overview.md) §5:
 | `allowOut`, `denyOut` | Append higher-precedence entries after lower-precedence entries, deduplicate by normalized entry. Each entry retains its provenance (§4.6); deduplication MUST keep the **lowest**-precedence provenance for a duplicated entry, so a deny stays binding. |
 | `portRules` | Append + deduplicate by `name`. Entries retain provenance and are subject to binding denies exactly as `allowOut` entries are (§4.6): a `portRule` shadowed by a binding deny does not open, and MUST be reported as a `policyWarnings` entry. |
 | `rules` | Higher-precedence rules sort before lower-precedence rules. Same-`name` rules are **not** merged or replaced; both remain, request-first, and first-match-wins resolves the effective outcome. |
+| `onViolation` | `kill` wins ([overview.md](./overview.md) §8.1.7). Given §4.8, a template setting `kill` makes every rejected connection fatal for sandboxes created from it, and a request cannot soften that. |
+| `audit` | Most detailed wins (`metadata` > `none`). |
 | `ingress.*` | Scalar semantics; explicit value overrides. |
 
 ### 5.1 Grantable fields
@@ -136,13 +159,15 @@ network:
   denyOut: []            # plus built-in private-CIDR denies
   portRules: []
   rules: []
+  onViolation: deny
+  audit: none
   ingress:
     allowPublicTraffic: true
 ```
 
 This is byte-for-byte today's behavior for requests that carry no network fields.
 
-Under `tier: restricted` the same fields resolve to a deny-all posture instead — `allowInternetAccess: false` and `ingress.allowPublicTraffic: false` — so that "no inbound or outbound access unless named" is one field on the policy rather than two per module. The tier only changes these defaults; every evaluation rule in §4 is unchanged, and an explicit field in the same source still wins ([overview.md](./overview.md) §7.1 rule 3).
+Under `tier: restricted` the same fields resolve to a deny-all posture instead — `allowInternetAccess: false` and `ingress.allowPublicTraffic: false` — so that "no inbound or outbound access unless named" is one field on the policy rather than two per module. The tier only changes these defaults; every evaluation rule in §4 is unchanged, and an explicit field in the same source still wins ([overview.md](./overview.md) §7.1 rule 3). `onViolation` stays `deny` under `restricted`, per [overview.md](./overview.md) §8.1.7 — and emphatically so here, since a tier that paired deny-all egress with `kill` would terminate a sandbox on its first unnamed destination, which is a very long way from what "give me a locked-down sandbox" asks for.
 
 ### 6.1 Shadow evaluation support
 
@@ -163,7 +188,9 @@ Two module-specific points:
 | `POLICY_NETWORK_LIMIT` | 400 | `{map, got, max}` | Final unique entry count exceeds a map limit. |
 | `POLICY_NETWORK_CONFLICT` | 400 | `{field, legacyField}` | A legacy field and `policy.network` are both present (§8). |
 
-Egress rejections at runtime are **not** API errors; they surface to the sandbox as connection failures (`ECONNREFUSED`-class TCP resets for rejected TCP, drops otherwise), exactly as today.
+Egress rejections at runtime are **not** API errors; they surface to the sandbox as connection failures (`ECONNREFUSED`-class TCP resets for rejected TCP, drops otherwise), exactly as today. Under `onViolation: kill` (§4.8) the sandbox is terminated instead, and the terminal state records the destination and the matched rule as the cause.
+
+Every rejected connection MUST emit a violation event at **every** audit level, including `audit: none` ([overview.md](./overview.md) §8.1.4): `{sandboxID, destination, port, protocol, rule?, provenance?, outcome: denied|killed, effectivePolicyVersion, shadow: false}`. What `audit: metadata` adds is the record of **ordinary** connections — the ones that were allowed — which is the high-volume part and the part a deployment may reasonably decline. One event per connection, not per packet, on the same terms as §6.1.2.
 
 Non-fatal findings are returned in a `policyWarnings` array on the create/update response. A warning never changes the outcome of the request; it reports that part of the submitted policy has no effect. Defined warnings: an `allowOut` entry shadowed by a binding deny (§4.6.4), and a `portRule` shadowed by a broader `allowOut` entry (§2.1.4).
 
@@ -202,6 +229,8 @@ Template merge applies unchanged: a template's network configuration becomes the
 14. **Restricted tier.** `tier: restricted` with no network fields resolves to `allowInternetAccess: false` and `ingress.allowPublicTraffic: false`, and the effective policy records those expanded values. A source that sets `tier: restricted` and also `allowInternetAccess: true` explicitly gets `true` from that source, subject to the narrow-only rule against lower-precedence sources.
 15. **Statefulness.** With `allowInternetAccess: false` and a single `allowOut` entry for one destination, an outbound TCP connection to it succeeds **and its response is received** with no reverse rule present. The same holds for a `portRule`-admitted connection, whose reply arrives on an ephemeral source port. With `ingress.allowPublicTraffic: false` set at the same time, that response is still received — the reply direction is not ingress (§4.7).
 16. **Shadow evaluation.** With `tier: baseline` and `auditTier: restricted`, a connection to an unnamed public destination **succeeds** and emits a `shadow: true` event naming the destination and the field that would have rejected it. A connection to a built-in-denied private CIDR is rejected as it is today and emits **no** shadow finding. Nothing observable inside the sandbox differs from the same configuration without `auditTier`. One shadow event is emitted per connection, not per packet.
+17. **Violation action.** With `onViolation: deny` (the default), a rejected connection fails and the sandbox keeps running — today's behavior. With `onViolation: kill`, the same rejected connection terminates the **sandbox**, and the terminal state names the destination and matched rule. A template setting `kill` cannot be softened to `deny` by a request.
+18. **Violations are audited at `audit: none`.** With the default `audit: none`, a rejected connection still emits a violation event carrying `shadow: false` and the destination; what `audit: none` suppresses is only the record of allowed connections. Events are emitted once per connection.
 
 ## 10. Open questions
 

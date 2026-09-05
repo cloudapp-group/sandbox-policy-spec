@@ -199,7 +199,17 @@ Structured error payloads (all enforcement errors carry them so agents can self-
 
 Non-fatal findings are returned in a `policyWarnings` array on the create/update response; a warning never changes the outcome of the request. Defined warning: `interpreter_admitted` (§3.6.2).
 
-Audit events (`audit: metadata`): `{sandboxID, user, command, effectiveTimeoutSec, exitCode, outcome: allowed\|denied, rule?}`. `full` adds stdout/stderr excerpts capped at a fixed byte limit. `none` emits nothing. Audit events MUST NOT be emitted into the sandbox itself.
+Audit events (`audit: metadata`): `{sandboxID, user, command, effectiveTimeoutSec, exitCode, outcome: allowed|denied, rule?}`. `full` adds stdout/stderr excerpts capped at a fixed byte limit. Audit events MUST NOT be emitted into the sandbox itself.
+
+Per [overview.md](./overview.md) §8.1.4, a **denied** execution emits a violation event at every audit level, including `audit: none`: `{sandboxID, user, command, rule, subCommand, mode, outcome: denied, effectivePolicyVersion, shadow: false}`. What `audit: none` suppresses is the record of executions that were *allowed* — the ordinary activity. This module is the one where that distinction costs least: a denial here is already a structured `400` to the caller, so the event duplicates information the caller has, and its value is to the operator reading the stream rather than to the agent that was refused.
+
+### 7.1 No violation action
+
+Per [overview.md](./overview.md) §8.1.6, this module states its position: **it has no `onViolation` field.**
+
+The enforcement point is the control interface, so a violation is caught *before* the process exists. There is nothing to kill — the whole point of §4.2 is that the command never ran — and `deny` is the only coherent outcome. A field with one legal value is worse than no field, because it implies the existence of a second value.
+
+This is also the cleanest illustration of why `kill` is not universally available (§8.1.3 of [overview.md](./overview.md)): the action a module can take on a violation is bounded by where the module enforces. `exec` sits early enough that refusal is total, which is exactly why §3.6 keeps insisting that its refusals cover so little.
 
 ## 8. Merge semantics
 

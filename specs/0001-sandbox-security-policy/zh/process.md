@@ -36,6 +36,7 @@ policy:
     runAsNonRoot:         bool                      # 默认：false
     allowDaemonize:       bool                      # 默认：true
     allowedCapabilities:  [string]                  # 默认：平台默认集合；["none"] = 空集
+    onViolation:          deny | kill               # 默认：deny —— 适用于 §3 与 §4
     audit:                none | metadata           # 默认：none
     syscall:
       mode:                       baseline | denylist | allowlist   # 默认：baseline
@@ -44,7 +45,7 @@ policy:
       deniedSyscalls:             [string]
       allowedSyscalls:            [string]
       implicitEssentialSyscalls:  bool              # 默认：true
-      onViolation:                deny | kill       # 默认：deny
+      onViolation:                deny | kill       # 默认：继承 process.onViolation
 ```
 
 ## 3. 权限语义
@@ -192,8 +193,23 @@ deniedSyscalls:
 1. 策略**必须**适用于沙箱运行的**每一个进程**，而不只是某个特定入口点的后代进程。一个 shell 出去执行任意二进制的进程**必须**继承同一套限制。
 2. 强制执行**不得**依赖环境变量、`LD_PRELOAD`、`PATH` 操纵或任何纯用户态的拦截 —— 与 [filesystem.md](./filesystem.md) §4.3.2 相同的要求，理由也相同：这些全都在工作负载的掌控之中。
 3. 限制**必须**在目标程序的第一条指令执行之前安装好，并**必须**对该进程及其后代不可逆。
-4. `onViolation: deny` 以 `EPERM` 把拒绝呈现给调用进程。`onViolation: kill` 则终止该进程。`kill` 把一个被利用的进程变成一个死进程，而不是一个学到了哪些系统调用被过滤的进程；`deny` 让那些不合身但诚实的工作负载继续跑。二者都不是普适正确的，所以它是一个字段。
+4. 违规动作由 `onViolation` 决定（§4.6）。它同样治理 §3 与 §4，而 `syscall.onViolation` 只为系统调用面覆盖它。
 5. 拒绝**不得**以一种可与普通权限失败区分开的方式，向沙箱泄露命中规则的身份。规则身份属于审计流（§6），而不属于某条工作负载可以探测的旁路。
+
+### 4.6 违规动作
+
+依 [overview.md](./overview.md) §8.1，本模块把每一次违规 —— 提权（§3.1）、使用集合之外的能力（§3.2）、脱离或重挂父进程（§3.3）、抵达 uid 0（§3.5），以及每一次被拒绝的系统调用（§4.1）—— 都通过同一个字段来解析：
+
+| 动作 | 结果 |
+| --- | --- |
+| `deny`（默认） | 操作失败：系统调用拒绝对调用进程返回 `EPERM`，其余情况返回相应的 OS 级失败。进程继续运行。 |
+| `kill` | 改为终止**那个违规进程**。这里的强制执行点在内核边界上，精确地知道自己的调用者，所以终止是精准的 —— 不同于 `network`，同一个动作在那里会结束整个沙箱（[overview.md](./overview.md) §8.1.3）。 |
+
+1. `syscall.onViolation` 被设置时，**仅为系统调用面**覆盖 `onViolation`。§3 的违规始终遵循模块级字段。之所以存在两级，是因为系统调用面是那个"一份过紧的 `allowlist` 会产出本属*策略*而非工作负载之过的违规"的地方，而一个部署完全可能合理地希望那些被拒绝，同时让一次提权尝试被杀掉。
+2. `syscall.onViolation` 缺省时继承 `onViolation`。由于两者都默认为 `deny`，一份未配置的策略的行为与本字段存在之前完全一致。
+3. `kill` 把一个被利用的进程变成一个死进程，而不是一个学到了哪些系统调用被过滤的进程；`deny` 让那些不合身但诚实的工作负载继续跑。二者都不是普适正确的，所以它是一个字段，而默认值取的是保守的那个。
+4. 没有 `warn` 动作，理由见 [overview.md](./overview.md) §8.1.2：一个检测到提权之后又放行它的动作，不是策略。要观察一个更严的姿态*本来会*拒绝什么，用 `auditTier`（§6.1）。
+5. 两种动作都会产生违规事件，且在任何审计级别下都产生（[overview.md](./overview.md) §8.1.4）。
 
 ## 5. 字段规格
 
@@ -204,14 +220,15 @@ deniedSyscalls:
 | `runAsNonRoot` | `bool?` | — | `false` | §3.5。 |
 | `allowDaemonize` | `bool?` | — | `true` | §3.3。 |
 | `allowedCapabilities` | `[string]?` | 已知能力名，或保留的单一条目 `["none"]`，后者**不得**与名称混用。 | `[]` = 平台默认集合 | §3.2。 |
-| `audit` | `enum?` | `none` \| `metadata` | `none` | 进程策略事件的审计级别（§6）。 |
+| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.6。适用于 §3 与 §4。 |
+| `audit` | `enum?` | `none` \| `metadata` | `none` | **普通**进程事件的审计级别（§6）。它不压制违规事件（[overview.md](./overview.md) §8.1.4）。 |
 | `syscall.mode` | `enum?` | `baseline` \| `denylist` \| `allowlist` | `baseline` | §4.1。 |
 | `syscall.baselineVersion` | `string?` | 已发布的集合标识。未知取值**必须**以 `400 INVALID_POLICY` 拒绝。 | 平台默认值 | §4.3。 |
 | `syscall.baselineExceptions` | `[string]?` | 每个条目**必须**与被 pin 集合中的条目精确匹配。 | `[]` | §4.3。 |
 | `syscall.deniedSyscalls` | `[string]?` | 仅在 `mode: denylist` 下有意义。 | `[]` | 额外被拒绝的系统调用。 |
 | `syscall.allowedSyscalls` | `[string]?` | 仅在 `mode: allowlist` 下有意义；此时**必须**非空。 | `[]` | 被许可的集合，外加 §4.4。 |
 | `syscall.implicitEssentialSyscalls` | `bool?` | — | `true` | §4.4。 |
-| `syscall.onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.5.4。 |
+| `syscall.onViolation` | `enum?` | `deny` \| `kill` | 继承 `onViolation` | §4.6。仅为系统调用面覆盖 `onViolation`。 |
 
 在 `mode: denylist` 下设置 `allowedSyscalls`、或在 `mode: allowlist` 下设置 `deniedSyscalls`，**必须**以 `400 INVALID_POLICY` 拒绝：该字段在那个模式下没有意义，而接受它会让作者以为某份清单正在生效，而其实并没有。
 
@@ -226,9 +243,10 @@ deniedSyscalls:
 | `noNewPrivileges` | `false` | `true` |
 | `runAsNonRoot` | `false` | `true` |
 | `allowDaemonize` | `true` | `false` |
+| `onViolation` | `deny` | `deny` |
 | `audit` | `none` | `metadata` |
 
-两个分级都让 `syscall/1` 拒绝集合生效。只有特权与持久化不同，因为这是无需知道工作负载就能做的决定：一个镜像要么需要 `sudo` 要么不需要，要么以 root 运行要么不是，而无论哪种情况失败都是立即且可读的。系统调用面不是分级该决定的事，理由正相反 —— 进一步收窄它需要知道镜像用到哪些系统调用，而一个会去猜的分级会产生 §4.4 存在的目的所要防止的"进程起不来"式失败。`allowedCapabilities` 因同样的理由被留在原样：`["none"]` 对大多数 Agent 工作负载是对的取值，对任何要绑定特权端口的镜像是错的取值，而分级分不清自己手上是哪一种。`restricted` 是否应该引入第二个更大的基线集合，记录为 §10.2。
+两个分级都让 `syscall/1` 拒绝集合生效。只有特权与持久化不同，因为这是无需知道工作负载就能做的决定：一个镜像要么需要 `sudo` 要么不需要，要么以 root 运行要么不是，而无论哪种情况失败都是立即且可读的。系统调用面不是分级该决定的事，理由正相反 —— 进一步收窄它需要知道镜像用到哪些系统调用，而一个会去猜的分级会产生 §4.4 存在的目的所要防止的"进程起不来"式失败。`allowedCapabilities` 因同样的理由被留在原样：`["none"]` 对大多数 Agent 工作负载是对的取值，对任何要绑定特权端口的镜像是错的取值，而分级分不清自己手上是哪一种。`onViolation` 在两个分级下都留在 `deny`，那有它自己的理由，见 [overview.md](./overview.md) §8.1.7。`restricted` 是否应该引入第二个更大的基线集合，记录为 §10.2。
 
 在这几项里，`runAsNonRoot: true` 是最有可能直接拒掉一个存量镜像的那一项（§3.5 规则 2）。这是有意的，而 [overview.md](./overview.md) §7.2 就是运维在真正投入之前弄清这件事的方式：`auditTier: restricted` 会上报哪些沙箱*本来会*被拒，而不拒任何一个。
 
@@ -238,14 +256,14 @@ deniedSyscalls:
 
 | 错误码 | 呈现面 | 载荷 | 何时 |
 | --- | --- | --- | --- |
-| `POLICY_PROCESS_SYSCALL_DENIED` | 对进程返回 `EPERM`；审计事件 | `{syscall, mode, source}` | 某个系统调用按 §4.1 被拒绝。 |
-| `POLICY_PROCESS_PRIVILEGE_DENIED` | OS 级失败；审计事件 | `{operation, binary?}` | 按 §3.1 拒绝提权、按 §3.2 拒绝某项能力，或按 §3.5.3 拒绝一次变成 uid 0 的尝试。 |
-| `POLICY_PROCESS_PERSISTENCE_DENIED` | OS 级失败；审计事件 | `{operation}` | 按 §3.3 拒绝脱离或重挂父进程。 |
+| `POLICY_PROCESS_SYSCALL_DENIED` | 对进程返回 `EPERM`，或在 `kill` 下终止进程；审计事件 | `{syscall, mode, source, action}` | 某个系统调用按 §4.1 被拒绝。 |
+| `POLICY_PROCESS_PRIVILEGE_DENIED` | OS 级失败，或在 `kill` 下终止进程；审计事件 | `{operation, binary?, action}` | 按 §3.1 拒绝提权、按 §3.2 拒绝某项能力，或按 §3.5.3 拒绝一次变成 uid 0 的尝试。 |
+| `POLICY_PROCESS_PERSISTENCE_DENIED` | OS 级失败，或在 `kill` 下终止进程；审计事件 | `{operation, action}` | 按 §3.3 拒绝脱离或重挂父进程。 |
 | `INVALID_POLICY` | `400` | `{field, reason}` | 未知系统调用名或能力名、`["none"]` 与能力名混用、`runAsNonRoot: true` 下解析出的沙箱用户为 uid 0（§3.5.2）、例外不在被 pin 集合中、`allowlist` 下 `allowedSyscalls` 为空、字段与模式不匹配。 |
 
-与 `filesystem` 一样，强制执行错误是 OS 级而非 API 级的，因为策略作用于 API 层之下。
+与 `filesystem` 一样，强制执行错误是 OS 级而非 API 级的，因为策略作用于 API 层之下。每份载荷都携带 `action: denied|killed`，使审计的读者无需通过"该进程之后再无事件"来反推，就能判断 §4.6 的两种结果中发生了哪一种。
 
-`audit: metadata` 下的审计事件：`{sandboxID, event: syscall_denied|privilege_denied|persistence_denied, syscall?, operation?, pid, comm, outcome: denied|killed, effectivePolicyVersion}`。每一个生效的 `baselineExceptions` 条目在创建时产生 `{sandboxID, baselineVersion, exception, sources}`（§4.3）。审计事件**不得**写入沙箱内部。
+违规事件在**任何**审计级别下都会产生，包括 `audit: none`，依 [overview.md](./overview.md) §8.1.4：`{sandboxID, event: syscall_denied|privilege_denied|persistence_denied, syscall?, operation?, pid, comm, outcome: denied|killed, effectivePolicyVersion, shadow: false}`。而 `audit: metadata` 所增加的是对**普通**活动的记录 —— 进程启动、解析出的用户、在用的能力集 —— 那才是一个部署可能合理地不想要的部分。每一个生效的 `baselineExceptions` 条目在创建时产生 `{sandboxID, baselineVersion, exception, sources}`（§4.3），同样与审计级别无关，因为削弱基线不是普通活动。审计事件**不得**写入沙箱内部。
 
 一个触发了系统调用拒绝的工作负载通常会反复触发它。实现**应该**聚合相同的 `{syscall, pid}` 拒绝，而不是每次调用发一条事件，使审计流在一份很紧的 `allowlist` 下仍然可读。
 
@@ -282,7 +300,8 @@ deniedSyscalls:
 | `syscall.deniedSyscalls` | 追加 + 去重。 |
 | `syscall.allowedSyscalls` | 各来源取**交集**：高优先级来源只能缩小被许可集合。追加会让请求放宽管理员的白名单，而 §5 禁止这样做。 |
 | `syscall.implicitEssentialSyscalls` | `false` 胜出（更严格）。 |
-| `syscall.onViolation` | `kill` 胜出。 |
+| `onViolation` | `kill` 胜出（[overview.md](./overview.md) §8.1.7）。 |
+| `syscall.onViolation` | `kill` 胜出。与 `onViolation` 独立合并；只设置模块级字段的来源不约束系统调用级的那个，反之亦然。 |
 | `audit` | 更详细者胜出（`metadata` > `none`）。 |
 
 ## 8. 可授权字段
@@ -318,13 +337,14 @@ deniedSyscalls:
 10. **用名字，不用编号。** 使用数字型系统调用编号的策略被拒绝；指名了一个有多个编号变体的系统调用的策略，在每一个受支持架构上覆盖其全部变体。
 11. **未知条目。** 未知系统调用名、未知能力名、以及不在被 pin 集合中的 `baselineExceptions` 条目，各自都以 `400 INVALID_POLICY` 并带 `field` 指针被拒绝。
 12. **必需集合。** `syscall.mode: allowlist` 且 `allowedSyscalls: [read, write]`，在 `implicitEssentialSyscalls: true` 下能成功启动进程，且生效策略记录了所施加的必需集合版本。在 `implicitEssentialSyscalls: false` 与同一份清单下，进程创建以一条带审计事件的策略拒绝失败 —— 而不是以一次无从解释的崩溃失败。
-13. **违规动作。** `onViolation: deny` 返回 `EPERM` 并让进程继续运行；`onViolation: kill` 终止它。两者都产生携带 `effectivePolicyVersion` 的审计事件。
-14. **版本 pin。** 已 pin 到 `syscall/1` 的沙箱在平台默认值推进到 `syscall/2` 时不受影响；未 pin 的沙箱无论如何都在其生效策略与快照中记录解析出的版本。
-15. **合并。** `allowedCapabilities` 与 `allowedSyscalls` 在各来源间取交集 —— 请求无法放宽其中任何一个，且任一来源给出 `["none"]` 时结果就是 `["none"]`。`noNewPrivileges: true`、`runAsNonRoot: true`、`allowDaemonize: false`、`onViolation: kill` 以及最严格的 `syscall.mode`，各自都从任一来源胜出。
-16. **例外取交集。** 请求声明了但模板未声明的 `baselineExceptions` 条目不生效，且其不生效按 [overview.md](./overview.md) §5 被报告。
-17. **授权。** 一份追加了某项具名能力的授权，在沙箱或任务不做任何动作的情况下到期，之后该能力再次不可用；针对 `["none"]` 的授权行为完全相同，并在到期时让沙箱回到零能力。试图授予 `mode: unrestricted`、`noNewPrivileges: false` 或 `runAsNonRoot: false` 的授权被拒绝；试图重开模板已关闭能力的授权以 `POLICY_GRANT_EXCEEDS_CEILING` 被拒绝。
-18. **无旁路。** 从沙箱内部看，被拒绝的系统调用与普通权限失败无法区分；命中的规则只出现在审计流中。
-19. **影子评估。** 在 `tier: baseline` 配 `auditTier: restricted` 下，镜像以 root 运行的沙箱**被成功创建**，并产生一条指名 `runAsNonRoot` 的创建时影子发现；一次 `setsid` 调用成功，并产生一条指名 `allowDaemonize` 的影子发现。没有任何操作被拒绝、没有返回 `EPERM`，且沙箱内部无法区分这份带影子的配置与不带影子的配置。每条影子事件都携带 `shadow: true` 与解析出的 `auditTier`。等于或宽于 `tier` 的 `auditTier` 以 `400 INVALID_POLICY` 被拒。
+13. **违规动作。** `onViolation: deny` 返回 `EPERM`（或相应的 OS 级失败）并让进程继续运行；`onViolation: kill` 终止它。该字段同样治理 §3 而不只是 §4：在 `noNewPrivileges: true` 配 `onViolation: kill` 下，执行一个 setuid 二进制会终止该进程，而不只是拒绝那次提权。`onViolation: kill` 之下的 `syscall.onViolation: deny` 会拒绝一次被过滤的系统调用，同时仍对提权尝试执行终止；而缺省的 `syscall.onViolation` 继承模块级取值。两种动作都产生携带 `effectivePolicyVersion` 与 `action`/`outcome` 的审计事件。
+14. **`audit: none` 下违规仍被审计。** 在默认的 `audit: none` 下，一次被拒绝的 `init_module` 仍然产生一条携带 `shadow: false` 的违规事件；`audit: none` 压掉的只是普通活动的记录。一份策略**不得**能够配置出"拒绝不留任何痕迹"的沙箱。
+15. **版本 pin。** 已 pin 到 `syscall/1` 的沙箱在平台默认值推进到 `syscall/2` 时不受影响；未 pin 的沙箱无论如何都在其生效策略与快照中记录解析出的版本。
+16. **合并。** `allowedCapabilities` 与 `allowedSyscalls` 在各来源间取交集 —— 请求无法放宽其中任何一个，且任一来源给出 `["none"]` 时结果就是 `["none"]`。`noNewPrivileges: true`、`runAsNonRoot: true`、`allowDaemonize: false`、`onViolation: kill` 以及最严格的 `syscall.mode`，各自都从任一来源胜出。
+17. **例外取交集。** 请求声明了但模板未声明的 `baselineExceptions` 条目不生效，且其不生效按 [overview.md](./overview.md) §5 被报告。
+18. **授权。** 一份追加了某项具名能力的授权，在沙箱或任务不做任何动作的情况下到期，之后该能力再次不可用；针对 `["none"]` 的授权行为完全相同，并在到期时让沙箱回到零能力。试图授予 `mode: unrestricted`、`noNewPrivileges: false` 或 `runAsNonRoot: false` 的授权被拒绝；试图重开模板已关闭能力的授权以 `POLICY_GRANT_EXCEEDS_CEILING` 被拒绝。
+19. **无旁路。** 从沙箱内部看，被拒绝的系统调用与普通权限失败无法区分；命中的规则只出现在审计流中。在 `onViolation: kill` 之下，被终止的进程什么也学不到，而留给兄弟进程的那点残余信号，是 [overview.md](./overview.md) §8.1.5 记录下的、被接受的取舍。
+20. **影子评估。** 在 `tier: baseline` 配 `auditTier: restricted` 下，镜像以 root 运行的沙箱**被成功创建**，并产生一条指名 `runAsNonRoot` 的创建时影子发现；一次 `setsid` 调用成功，并产生一条指名 `allowDaemonize` 的影子发现。没有任何操作被拒绝、没有返回 `EPERM`，且沙箱内部无法区分这份带影子的配置与不带影子的配置。每条影子事件都携带 `shadow: true` 与解析出的 `auditTier`。等于或宽于 `tier` 的 `auditTier` 以 `400 INVALID_POLICY` 被拒。
 
 ## 10. 开放问题
 

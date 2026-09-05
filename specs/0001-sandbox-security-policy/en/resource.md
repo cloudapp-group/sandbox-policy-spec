@@ -167,6 +167,10 @@ Action resolution: `limits.<dimension>.onExceeded` if set, else the resource-wid
 
 The default is `hold`: configuring a limit is opting into governance, and hold is the only action that is both safe (consumption stops) and reversible (no data loss) while leaving the final say to a human. Deployments without an on-call workflow SHOULD set `warn` or `pause` explicitly — held sandboxes remain subject to the standard idle-timeout lifecycle, so an unattended hold cannot leak resources forever.
 
+`onExceeded` is this module's only response field: per [overview.md](./overview.md) §8.1.6, there is **no `onViolation` here**. The two are not alternatives that happened to land in different modules — they answer different questions, and §8.1.1 fixes which is which. An exceedance means the workload stayed inside every boundary it was given and ran out of budget; a violation means it crossed one. That is why this action set has `warn` and `hold` while `onViolation` has neither: there is something for a human to decide about "needs more budget", and a warning about overspending leaves no protection disabled, because a budget was never a protection against intent.
+
+The one action both sets share is `kill`, and even it differs in scope. Here it terminates the **sandbox**, because consumption is a sandbox-level quantity with no single guilty process — the same granularity `network` is forced into for a different reason ([overview.md](./overview.md) §8.1.3).
+
 `policy.tier` ([overview.md](./overview.md) §7.1) does not change anything in this module. Both `baseline` and `restricted` resolve to template quotas, no windowed limits, and `onExceeded: hold` — the last of which is already the default above. This is stated rather than omitted because a reader who sees four modules shift under `tier: restricted` is entitled to know that the fifth deliberately does not: consumption budgets are workload-specific numbers, and there is no value for `llmTokens.total` that is "the restricted one". A tier that guessed would be a tier that breaks workloads for a security posture it cannot actually improve.
 
 ### 6.1 Shadow evaluation support

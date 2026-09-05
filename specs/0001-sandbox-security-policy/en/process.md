@@ -36,6 +36,7 @@ policy:
     runAsNonRoot:         bool                      # default: false
     allowDaemonize:       bool                      # default: true
     allowedCapabilities:  [string]                  # default: platform default set; ["none"] = empty set
+    onViolation:          deny | kill               # default: deny — applies to §3 and §4
     audit:                none | metadata           # default: none
     syscall:
       mode:                       baseline | denylist | allowlist   # default: baseline
@@ -44,7 +45,7 @@ policy:
       deniedSyscalls:             [string]
       allowedSyscalls:            [string]
       implicitEssentialSyscalls:  bool              # default: true
-      onViolation:                deny | kill       # default: deny
+      onViolation:                deny | kill       # default: inherits process.onViolation
 ```
 
 ## 3. Privilege semantics
@@ -192,8 +193,23 @@ Therefore, when `syscall.mode` is `allowlist`, a versioned **essential set** —
 1. The policy MUST apply to **every process** the sandbox runs, not only to processes descended from a particular entry point. A process that shells out to an arbitrary binary MUST inherit the same restrictions.
 2. Enforcement MUST NOT depend on environment variables, `LD_PRELOAD`, `PATH` manipulation, or any userspace-only interception — the same requirement as [filesystem.md](./filesystem.md) §4.3.2, and for the same reason: all of those are under the workload's control.
 3. The restriction MUST be installed before the first instruction of the target program runs, and MUST be irreversible for the process and its descendants.
-4. `onViolation: deny` surfaces the denial to the calling process as `EPERM`. `onViolation: kill` terminates the offending process instead. `kill` turns an exploited process into a dead process rather than one that learned which syscalls are filtered; `deny` keeps ill-fitting-but-honest workloads running. Neither is universally right, which is why it is a field.
+4. The violation action is `onViolation` (§4.6). It governs §3 and §4 alike, and `syscall.onViolation` overrides it for the syscall surface only.
 5. Denials MUST NOT leak the identity of the matched rule to the sandbox in a way distinguishable from an ordinary permission failure. Rule identity belongs in the audit stream (§6), not in a side channel the workload can probe.
+
+### 4.6 Violation actions
+
+Per [overview.md](./overview.md) §8.1, this module resolves every violation — privilege gain (§3.1), capability use outside the set (§3.2), detach or reparent (§3.3), reaching uid 0 (§3.5), and every denied system call (§4.1) — through one field:
+
+| Action | Result |
+| --- | --- |
+| `deny` (default) | The operation fails: `EPERM` to the calling process for a syscall denial, the corresponding OS-level failure otherwise. The process keeps running. |
+| `kill` | The **offending process** is terminated instead. Enforcement here sits at the kernel boundary and knows its caller exactly, so termination is precise — unlike `network`, where the same action ends the whole sandbox ([overview.md](./overview.md) §8.1.3). |
+
+1. `syscall.onViolation`, when set, overrides `onViolation` **for the syscall surface only**. §3 violations always follow the module-level field. Two levels exist because the syscall surface is where a tight `allowlist` produces violations that are the *policy's* fault rather than the workload's, and a deployment may reasonably want those denied while a privilege-escalation attempt is killed.
+2. When `syscall.onViolation` is absent it inherits `onViolation`. Since both default to `deny`, an unconfigured policy behaves exactly as before this field existed.
+3. `kill` turns an exploited process into a dead process rather than one that learned which syscalls are filtered; `deny` keeps ill-fitting-but-honest workloads running. Neither is universally right, which is why it is a field and why the default is the conservative one.
+4. There is no `warn` action, on the terms set out in [overview.md](./overview.md) §8.1.2: an action that detects a privilege escalation and then permits it is not a policy. To observe what a stricter posture *would* deny, use `auditTier` (§6.1).
+5. Both actions emit a violation event, at every audit level ([overview.md](./overview.md) §8.1.4).
 
 ## 5. Field specification
 
@@ -204,14 +220,15 @@ Therefore, when `syscall.mode` is `allowlist`, a versioned **essential set** —
 | `runAsNonRoot` | `bool?` | — | `false` | §3.5. |
 | `allowDaemonize` | `bool?` | — | `true` | §3.3. |
 | `allowedCapabilities` | `[string]?` | Known capability names, or the reserved single entry `["none"]`, which MUST NOT be mixed with names. | `[]` = platform default set | §3.2. |
-| `audit` | `enum?` | `none` \| `metadata` | `none` | Audit level for process-policy events (§6). |
+| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.6. Applies to §3 and §4. |
+| `audit` | `enum?` | `none` \| `metadata` | `none` | Audit level for **ordinary** process events (§6). It does not suppress violation events ([overview.md](./overview.md) §8.1.4). |
 | `syscall.mode` | `enum?` | `baseline` \| `denylist` \| `allowlist` | `baseline` | §4.1. |
 | `syscall.baselineVersion` | `string?` | A published set identifier. Unknown values MUST be rejected with `400 INVALID_POLICY`. | platform default | §4.3. |
 | `syscall.baselineExceptions` | `[string]?` | Each entry MUST match an entry of the pinned set exactly. | `[]` | §4.3. |
 | `syscall.deniedSyscalls` | `[string]?` | Meaningful only when `mode: denylist`. | `[]` | Additional denied syscalls. |
 | `syscall.allowedSyscalls` | `[string]?` | Meaningful only when `mode: allowlist`; MUST be non-empty then. | `[]` | The permitted set, plus §4.4. |
 | `syscall.implicitEssentialSyscalls` | `bool?` | — | `true` | §4.4. |
-| `syscall.onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.5.4. |
+| `syscall.onViolation` | `enum?` | `deny` \| `kill` | inherits `onViolation` | §4.6. Overrides `onViolation` for the syscall surface only. |
 
 Setting `allowedSyscalls` under `mode: denylist`, or `deniedSyscalls` under `mode: allowlist`, MUST be rejected with `400 INVALID_POLICY`: the field has no meaning in that mode, and accepting it would let an author believe a list is in force when it is not.
 
@@ -226,9 +243,10 @@ Which defaults apply is selected by `policy.tier` ([overview.md](./overview.md) 
 | `noNewPrivileges` | `false` | `true` |
 | `runAsNonRoot` | `false` | `true` |
 | `allowDaemonize` | `true` | `false` |
+| `onViolation` | `deny` | `deny` |
 | `audit` | `none` | `metadata` |
 
-Both tiers put the `syscall/1` deny set in force. Only privilege and persistence differ, because those are the decisions that can be made without knowing the workload: an image either needs `sudo` or it does not, it either runs as root or it does not, and the failure is immediate and legible either way. The syscall surface is not a tier decision for the opposite reason — narrowing it further requires knowing which syscalls the image uses, and a tier that guessed would produce the unstartable-process failure §4.4 exists to prevent. `allowedCapabilities` is left alone for the same reason: `["none"]` is the right value for most agent workloads and the wrong one for any image that binds a privileged port, and a tier cannot tell which it has. Whether `restricted` should pull in a second, larger baseline set is recorded as §10.2.
+Both tiers put the `syscall/1` deny set in force. Only privilege and persistence differ, because those are the decisions that can be made without knowing the workload: an image either needs `sudo` or it does not, it either runs as root or it does not, and the failure is immediate and legible either way. The syscall surface is not a tier decision for the opposite reason — narrowing it further requires knowing which syscalls the image uses, and a tier that guessed would produce the unstartable-process failure §4.4 exists to prevent. `allowedCapabilities` is left alone for the same reason: `["none"]` is the right value for most agent workloads and the wrong one for any image that binds a privileged port, and a tier cannot tell which it has. `onViolation` stays `deny` in both tiers for a reason of its own, given in [overview.md](./overview.md) §8.1.7. Whether `restricted` should pull in a second, larger baseline set is recorded as §10.2.
 
 Of these, `runAsNonRoot: true` is the one most likely to reject an existing image outright (§3.5 rule 2). That is intended, and §7.2 of [overview.md](./overview.md) is how an operator finds out before committing: `auditTier: restricted` reports which sandboxes *would* have been refused, without refusing any.
 
@@ -238,14 +256,14 @@ Of these, `runAsNonRoot: true` is the one most likely to reject an existing imag
 
 | Code | Surface | Payload | When |
 | --- | --- | --- | --- |
-| `POLICY_PROCESS_SYSCALL_DENIED` | `EPERM` to the process; audit event | `{syscall, mode, source}` | A syscall was denied under §4.1. |
-| `POLICY_PROCESS_PRIVILEGE_DENIED` | OS-level failure; audit event | `{operation, binary?}` | Privilege gain denied under §3.1, a capability denied under §3.2, or an attempt to become uid 0 denied under §3.5.3. |
-| `POLICY_PROCESS_PERSISTENCE_DENIED` | OS-level failure; audit event | `{operation}` | Detach or reparent denied under §3.3. |
+| `POLICY_PROCESS_SYSCALL_DENIED` | `EPERM` to the process, or termination under `kill`; audit event | `{syscall, mode, source, action}` | A syscall was denied under §4.1. |
+| `POLICY_PROCESS_PRIVILEGE_DENIED` | OS-level failure, or termination under `kill`; audit event | `{operation, binary?, action}` | Privilege gain denied under §3.1, a capability denied under §3.2, or an attempt to become uid 0 denied under §3.5.3. |
+| `POLICY_PROCESS_PERSISTENCE_DENIED` | OS-level failure, or termination under `kill`; audit event | `{operation, action}` | Detach or reparent denied under §3.3. |
 | `INVALID_POLICY` | `400` | `{field, reason}` | Unknown syscall or capability name, `["none"]` mixed with capability names, a resolved sandbox user of uid 0 under `runAsNonRoot: true` (§3.5.2), exception not present in the pinned set, empty `allowedSyscalls` under `allowlist`, field meaningless for the mode. |
 
-As with `filesystem`, enforcement errors are OS-level rather than API-level, because the policy applies below the API surface.
+As with `filesystem`, enforcement errors are OS-level rather than API-level, because the policy applies below the API surface. Each payload carries `action: denied|killed`, so an audit reader can tell which of §4.6's two outcomes occurred without inferring it from the absence of later events by that process.
 
-Audit events at `audit: metadata`: `{sandboxID, event: syscall_denied|privilege_denied|persistence_denied, syscall?, operation?, pid, comm, outcome: denied|killed, effectivePolicyVersion}`. Every effective `baselineExceptions` entry emits `{sandboxID, baselineVersion, exception, sources}` at creation (§4.3). Audit events MUST NOT be written inside the sandbox.
+Violation events are emitted at **every** audit level, including `audit: none`, per [overview.md](./overview.md) §8.1.4: `{sandboxID, event: syscall_denied|privilege_denied|persistence_denied, syscall?, operation?, pid, comm, outcome: denied|killed, effectivePolicyVersion, shadow: false}`. What `audit: metadata` adds is the record of **ordinary** activity — process starts, the resolved user, capability sets in use — which is the part a deployment may reasonably not want. Every effective `baselineExceptions` entry emits `{sandboxID, baselineVersion, exception, sources}` at creation (§4.3), also independent of the audit level, since weakening the baseline is not ordinary activity. Audit events MUST NOT be written inside the sandbox.
 
 A workload that trips a syscall denial usually trips it repeatedly. Implementations **SHOULD** aggregate identical `{syscall, pid}` denials rather than emitting one event per call, so an audit stream stays legible under a tight `allowlist`.
 
@@ -282,7 +300,8 @@ On top of the shared rules in [overview.md](./overview.md) §5:
 | `syscall.deniedSyscalls` | Append + deduplicate. |
 | `syscall.allowedSyscalls` | **Intersection** across sources: a higher-precedence source can only shrink the permitted set. Appending would let a request widen an administrator's allowlist, which §5 forbids. |
 | `syscall.implicitEssentialSyscalls` | `false` wins (most restrictive). |
-| `syscall.onViolation` | `kill` wins. |
+| `onViolation` | `kill` wins ([overview.md](./overview.md) §8.1.7). |
+| `syscall.onViolation` | `kill` wins. Merged independently of `onViolation`; a source that sets only the module-level field does not constrain the syscall-level one, and vice versa. |
 | `audit` | Most detailed wins (`metadata` > `none`). |
 
 ## 8. Grantable fields
@@ -318,13 +337,14 @@ Every grant here remains subject to the ceiling ([overview.md](./overview.md) §
 10. **Names, not numbers.** A policy using a numeric syscall identifier is rejected; a policy naming a syscall with multiple numbered variants covers all of them on every supported architecture.
 11. **Unknown entries.** An unknown syscall name, an unknown capability name, and a `baselineExceptions` entry absent from the pinned set are each rejected with `400 INVALID_POLICY` and a `field` pointer.
 12. **Essential set.** `syscall.mode: allowlist` with `allowedSyscalls: [read, write]` starts a process successfully with `implicitEssentialSyscalls: true`, and the effective policy records the applied essential-set version. With `implicitEssentialSyscalls: false` and the same list, process creation fails as a policy denial with an audit event — not as an unexplained crash.
-13. **Violation action.** `onViolation: deny` returns `EPERM` and leaves the process running; `onViolation: kill` terminates it. Both emit an audit event carrying `effectivePolicyVersion`.
-14. **Version pinning.** A sandbox pinned to `syscall/1` is unaffected when the platform default rolls to `syscall/2`; an unpinned sandbox records the resolved version in its effective policy and snapshot either way.
-15. **Merge.** `allowedCapabilities` and `allowedSyscalls` are intersected across sources — a request cannot widen either, and `["none"]` from any source yields `["none"]`. `noNewPrivileges: true`, `runAsNonRoot: true`, `allowDaemonize: false`, `onViolation: kill`, and the most restrictive `syscall.mode` each win from any source.
-16. **Exception intersection.** A `baselineExceptions` entry declared by the request but not by the template does not take effect, and its ineffectiveness is reported per [overview.md](./overview.md) §5.
-17. **Grants.** A grant adding a named capability expires without any action by the sandbox or the task, after which the capability is unavailable again; a grant against `["none"]` behaves identically and returns the sandbox to zero capabilities at expiry. A grant attempting `mode: unrestricted`, `noNewPrivileges: false`, or `runAsNonRoot: false` is rejected; a grant attempting to reopen a capability the template closed is rejected with `POLICY_GRANT_EXCEEDS_CEILING`.
-18. **No side channel.** A denied syscall is indistinguishable from an ordinary permission failure from inside the sandbox; the matched rule appears only in the audit stream.
-19. **Shadow evaluation.** With `tier: baseline` and `auditTier: restricted`, a sandbox whose image runs as root is **created successfully** and emits a creation-time shadow finding naming `runAsNonRoot`; a `setsid` call succeeds and emits a shadow finding naming `allowDaemonize`. No operation is denied, no `EPERM` is returned, and nothing inside the sandbox can distinguish the shadowed configuration from an unshadowed one. Every shadow event carries `shadow: true` and the resolved `auditTier`. An `auditTier` equal to or looser than `tier` is rejected with `400 INVALID_POLICY`.
+13. **Violation action.** `onViolation: deny` returns `EPERM` (or the corresponding OS-level failure) and leaves the process running; `onViolation: kill` terminates it. The field governs §3 as well as §4: with `noNewPrivileges: true` and `onViolation: kill`, executing a `setuid` binary terminates the process rather than merely denying the gain. `syscall.onViolation: deny` under `onViolation: kill` denies a filtered syscall while still killing on a privilege-escalation attempt, and an absent `syscall.onViolation` inherits the module-level value. Both actions emit an audit event carrying `effectivePolicyVersion` and `action`/`outcome`.
+14. **Violations are audited at `audit: none`.** With the default `audit: none`, a denied `init_module` still produces a violation event carrying `shadow: false`; what `audit: none` suppresses is only the ordinary-activity record. A policy MUST NOT be able to configure a sandbox in which a denial leaves no trace.
+15. **Version pinning.** A sandbox pinned to `syscall/1` is unaffected when the platform default rolls to `syscall/2`; an unpinned sandbox records the resolved version in its effective policy and snapshot either way.
+16. **Merge.** `allowedCapabilities` and `allowedSyscalls` are intersected across sources — a request cannot widen either, and `["none"]` from any source yields `["none"]`. `noNewPrivileges: true`, `runAsNonRoot: true`, `allowDaemonize: false`, `onViolation: kill`, and the most restrictive `syscall.mode` each win from any source.
+17. **Exception intersection.** A `baselineExceptions` entry declared by the request but not by the template does not take effect, and its ineffectiveness is reported per [overview.md](./overview.md) §5.
+18. **Grants.** A grant adding a named capability expires without any action by the sandbox or the task, after which the capability is unavailable again; a grant against `["none"]` behaves identically and returns the sandbox to zero capabilities at expiry. A grant attempting `mode: unrestricted`, `noNewPrivileges: false`, or `runAsNonRoot: false` is rejected; a grant attempting to reopen a capability the template closed is rejected with `POLICY_GRANT_EXCEEDS_CEILING`.
+19. **No side channel.** A denied syscall is indistinguishable from an ordinary permission failure from inside the sandbox; the matched rule appears only in the audit stream. Under `onViolation: kill` the terminated process learns nothing, and the residual signal available to a sibling process is the accepted trade recorded in [overview.md](./overview.md) §8.1.5.
+20. **Shadow evaluation.** With `tier: baseline` and `auditTier: restricted`, a sandbox whose image runs as root is **created successfully** and emits a creation-time shadow finding naming `runAsNonRoot`; a `setsid` call succeeds and emits a shadow finding naming `allowDaemonize`. No operation is denied, no `EPERM` is returned, and nothing inside the sandbox can distinguish the shadowed configuration from an unshadowed one. Every shadow event carries `shadow: true` and the resolved `auditTier`. An `auditTier` equal to or looser than `tier` is rejected with `400 INVALID_POLICY`.
 
 ## 10. Open questions
 

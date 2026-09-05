@@ -25,6 +25,8 @@ policy:
     denyOut:       [string]            # 仅 IPv4 / IPv4 CIDR
     portRules:     [PortRule]          # 按协议与端口限定范围的 L4 允许规则
     rules:         [EgressRule]        # L7 规则，首匹配生效（既有语法）
+    onViolation:   deny | kill         # 默认：deny —— 见 §4.8
+    audit:         none | metadata     # 默认：none
     ingress:
       allowPublicTraffic: bool         # 默认: true
       maskRequestHost:   string        # Host 权威模板，"${PORT}" 展开
@@ -57,6 +59,8 @@ policy:
 | `denyOut` | `[string]?` | 每项：IPv4 或 IPv4 CIDR。域名**必须**以 `400 INVALID_POLICY` 拒绝。 | `[]` | 显式拒绝的出站目的地。 |
 | `portRules` | `[PortRule]?` | 按 §2.1。`name` 在列表内**必须**唯一。 | `[]` | 按端口与协议限定范围的允许规则。 |
 | `rules` | `[EgressRule]?` | 遵循既有 L7 规则语法：`name`、`match.{scheme,sni,host,method,path}`、`action.{allow,audit,inject}`。 | `[]` | L7 HTTP/HTTPS 规则，首匹配生效。 |
+| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.8。注意 `kill` 结束的是**沙箱**，不是某个进程。 |
+| `audit` | `enum?` | `none` \| `metadata` | `none` | **普通**连接活动的审计级别（§7）。它不压制违规事件（[overview.md](./overview.md) §8.1.4）。 |
 | `ingress.allowPublicTraffic` | `bool?` | — | `true` | 为 `false` 时，公开入站访问需要携带有效的 traffic-access token。 |
 | `ingress.maskRequestHost` | `string?` | Host 权威模板；`${PORT}` 展开为所请求的沙箱端口。 | 未设置 | 改写转发给沙箱服务的 Host 权威。仅作用于入站。 |
 
@@ -102,6 +106,23 @@ allow 先于 deny（第 3 步先于第 4 步）是今天的行为，予以保留
 
 这一点被写下来而不是留给数据路径，因为它正是让一套规则可被评审的那个属性。在无状态模型下，每一条 `allowOut` 条目都需要配一条覆盖临时端口区间的反向条目 —— 而那既是每个作者都会忘掉的东西，又在一旦写出之后成为一个远比它本要服务的那条规则更宽的洞。云安全组正是因为这个原因而有状态，而本规格连同语法一并继承了这个预期（§1）。
 
+### 4.8 违规动作
+
+依 [overview.md](./overview.md) §8.1，`onViolation` 决定当 §4.1 拒绝一个连接时会发生什么：
+
+| 动作 | 结果 |
+| --- | --- |
+| `deny`（默认） | 连接像今天一样失败：被拒 TCP 返回 `ECONNREFUSED` 类 RST，其余丢弃（§7）。 |
+| `kill` | **沙箱**被终止。 |
+
+第二行的粒度正是本小节的要点，而它是一个局限，不是一种设计偏好：
+
+1. **这里的 `kill` 结束的是沙箱，而不是那个违规进程。** L3/L4 强制执行作用在数据包上。当一个连接被拒绝时，在那一层已经无法可靠地知道是哪个进程打开了这个 socket —— 而一次尽力而为的归因比不归因更糟，因为它会终止那个被猜中的进程。结束沙箱是这个强制执行点唯一能诚实采取的动作。
+2. **因此一个设置 `kill` 的部署，选择的是"一个被拒连接终结整个沙箱"。** 对于一个本就绝不该访问未被指名目标的工作负载，这是一种正当的姿态；而对任何会做探测的东西，它是破坏性的。它**不得**在"以为它的行为像 `filesystem` 或 `process` 的 `kill`"的假设下被选择，那两者是进程级的（[overview.md](./overview.md) §8.1.3）。
+3. **内置私网 CIDR 拒绝（§4.2）也参与其中。** 在 `kill` 之下，一次到 `169.254.169.254` 的连接尝试会终结沙箱。这是 `kill` 最站得住脚的场景 —— 没有任何正当的东西会去访问元数据端点 —— 同时也是最可能意外触发的场景，因为有些运行时会在启动时探测这类地址。请先影子那个分级（§6.1）。
+4. 没有 `warn`，理由见 [overview.md](./overview.md) §8.1.2。`auditTier`（§6.1）才是一个部署用来弄清"一个更严的姿态会拒绝哪些目标"、同时让当前规则保持强制的方式。
+5. 两种动作都会产生违规事件，且在任何审计级别下都产生（§7）。
+
 ## 5. 合并语义
 
 在 [overview.md](./overview.md) §5 的共享规则之上：
@@ -112,6 +133,8 @@ allow 先于 deny（第 3 步先于第 4 步）是今天的行为，予以保留
 | `allowOut`、`denyOut` | 高优先级条目追加在低优先级条目之后，按规范化条目去重。每个条目保留其来源标记（§4.6）；去重时**必须**为重复条目保留**最低**优先级的来源标记，使拒绝保持绑定性。 |
 | `portRules` | 按 `name` 追加并去重。条目保留来源标记，并与 `allowOut` 条目完全一样受绑定性拒绝约束（§4.6）：被绑定性拒绝遮蔽的 `portRule` 不会打开，且**必须**以 `policyWarnings` 条目上报。 |
 | `rules` | 高优先级规则排在低优先级规则之前。同名规则**不**合并也不替换；两条都保留、请求侧在前，由首匹配决定实际结果。 |
+| `onViolation` | `kill` 胜出（[overview.md](./overview.md) §8.1.7）。鉴于 §4.8，一个设置 `kill` 的模板会让由它创建的沙箱的每一次连接拒绝都成为致命的，而请求无法把它调软。 |
+| `audit` | 更详细者胜出（`metadata` > `none`）。 |
 | `ingress.*` | 标量语义；显式值覆盖。 |
 
 ### 5.1 可授权字段
@@ -136,13 +159,15 @@ network:
   denyOut: []            # 加内置私网 CIDR 拒绝
   portRules: []
   rules: []
+  onViolation: deny
+  audit: none
   ingress:
     allowPublicTraffic: true
 ```
 
 这与今天不携带网络字段的请求行为逐字节一致。
 
-在 `tier: restricted` 之下，同一批字段改为解析出 deny-all 姿态 —— `allowInternetAccess: false` 与 `ingress.allowPublicTraffic: false` —— 从而让「未经指名就不进不出」成为策略上的一个字段，而不是每个模块两个字段。分级只改这些默认值；§4 的每一条求值规则都不变，同一来源内的显式字段依然胜出（[overview.md](./overview.md) §7.1 规则 3）。
+在 `tier: restricted` 之下，同一批字段改为解析出 deny-all 姿态 —— `allowInternetAccess: false` 与 `ingress.allowPublicTraffic: false` —— 从而让「未经指名就不进不出」成为策略上的一个字段，而不是每个模块两个字段。分级只改这些默认值；§4 的每一条求值规则都不变，同一来源内的显式字段依然胜出（[overview.md](./overview.md) §7.1 规则 3）。`onViolation` 在 `restricted` 之下仍是 `deny`，依 [overview.md](./overview.md) §8.1.7 —— 而在这里尤其如此，因为一个把 deny-all 出站与 `kill` 配在一起的分级，会在沙箱访问第一个未被指名目标时就把它终结，而那离「给我一个被锁定的沙箱」这个诉求已经非常远了。
 
 ### 6.1 影子评估支持
 
@@ -163,7 +188,9 @@ network:
 | `POLICY_NETWORK_LIMIT` | 400 | `{map, got, max}` | 最终唯一条目数超过表上限。 |
 | `POLICY_NETWORK_CONFLICT` | 400 | `{field, legacyField}` | 遗留字段与 `policy.network` 同时出现（§8）。 |
 
-运行时的出站拒绝**不是** API 错误；与今天一致，它以连接失败的形式呈现给沙箱（被拒 TCP 返回 `ECONNREFUSED` 类 RST，其余丢弃）。
+运行时的出站拒绝**不是** API 错误；与今天一致，它以连接失败的形式呈现给沙箱（被拒 TCP 返回 `ECONNREFUSED` 类 RST，其余丢弃）。在 `onViolation: kill`（§4.8）之下沙箱被终止，且终止状态把该目标与命中的规则记录为原因。
+
+每一个被拒连接都**必须**在**任何**审计级别下产生一条违规事件，包括 `audit: none`（[overview.md](./overview.md) §8.1.4）：`{sandboxID, destination, port, protocol, rule?, provenance?, outcome: denied|killed, effectivePolicyVersion, shadow: false}`。而 `audit: metadata` 所增加的是对**普通**连接 —— 也就是被放行的那些 —— 的记录，那才是量大的部分，也是一个部署可能合理地不想要的部分。按连接一条事件，而不是按数据包，条件与 §6.1.2 相同。
 
 非致命发现以 `policyWarnings` 数组随创建/更新响应返回。警告绝不改变请求的结果；它只说明所提交策略的某一部分不生效。已定义的警告：被绑定性拒绝遮蔽的 `allowOut` 条目（§4.6.4），以及被更宽的 `allowOut` 条目遮蔽的 `portRule`（§2.1.4）。
 
@@ -202,6 +229,8 @@ network:
 14. **受限分级。** `tier: restricted` 且不带任何网络字段，解析为 `allowInternetAccess: false` 与 `ingress.allowPublicTraffic: false`，且生效策略记录这些展开值。某个来源同时设置 `tier: restricted` 与显式 `allowInternetAccess: true` 时，从该来源得到 `true`，但仍受对低优先级来源的只能收窄规则约束。
 15. **有状态性。** 在 `allowInternetAccess: false` 且只有一条指向某个目标的 `allowOut` 条目时，一次到该目标的出站 TCP 连接成功**且能收到其响应**，全程不存在任何反向规则。由 `portRule` 放行的连接同样成立，其回程抵达时源端口是临时端口。同时设置 `ingress.allowPublicTraffic: false` 时，该响应仍然能收到 —— 回程方向不是 ingress（§4.7）。
 16. **影子评估。** 在 `tier: baseline` 配 `auditTier: restricted` 下，一次到未被指名的公网目标的连接**成功**，并产生一条 `shadow: true` 事件，指名该目标以及本来会拒绝它的那个字段。一次到被内置拒绝的私网 CIDR 的连接像今天一样被拒绝，且**不**产生任何影子发现。沙箱内部可观察到的一切，与同一份配置不带 `auditTier` 时毫无差别。影子事件按连接产生一条，而不是按数据包。
+17. **违规动作。** 在 `onViolation: deny`（默认）下，一个被拒连接失败而沙箱继续运行 —— 也就是今天的行为。在 `onViolation: kill` 下，同一个被拒连接终止**沙箱**，且终止状态指名该目标与命中的规则。一个设置 `kill` 的模板不能被请求调软成 `deny`。
+18. **`audit: none` 下违规仍被审计。** 在默认的 `audit: none` 下，一个被拒连接仍然产生一条携带 `shadow: false` 与该目标的违规事件；`audit: none` 压掉的只是被放行连接的记录。事件按连接产生一条。
 
 ## 10. 开放问题
 
