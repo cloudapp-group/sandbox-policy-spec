@@ -1,0 +1,163 @@
+name: capability-unsupported-strict-rejects
+spec: overview.md §8.2.2
+description: >
+  Under enforcement: strict (the default), a policy naming a field the deployment
+  declares unsupported is rejected at create time. The alternative — accepting it —
+  produces the sandbox the caller believed was protected.
+given:
+  sources:
+    request:
+      policy:
+        network:
+          allowOut: ["*.example.com"]     # a domain entry
+  capabilities:
+    version: cap/1
+    default: enforced
+    fields:
+      "network.allowOut.domain":
+        state: unsupported
+        reason: "no name-based CNI policy and no L7 proxy in the egress path"
+  clock: "2026-09-06T00:00:00Z"
+expect:
+  error:
+    status: 400
+    code: POLICY_UNSUPPORTED
+    payload:
+      field: network.allowOut.domain
+      state: unsupported
+      capabilityVersion: cap/1
+---
+name: capability-unsupported-besteffort-accepts-and-reports
+spec: overview.md §8.2.2, §8.2.3
+description: >
+  Under bestEffort the same policy is accepted, but the inert field must be visible
+  in three places: the effective policy, the response warnings, and the audit stream.
+  A bestEffort policy that reads like an enforced one is worse than a rejection.
+given:
+  sources:
+    request:
+      policy:
+        enforcement: bestEffort
+        network:
+          allowOut: ["*.example.com"]
+  capabilities:
+    version: cap/1
+    default: enforced
+    fields:
+      "network.allowOut.domain":
+        state: unsupported
+        reason: "no name-based CNI policy and no L7 proxy in the egress path"
+  clock: "2026-09-06T00:00:00Z"
+expect:
+  effectivePolicy:
+    enforcement: bestEffort
+    network:
+      allowOut: ["*.example.com"]
+  inertFields:
+    - field: network.allowOut.domain
+      state: unsupported
+      capabilityVersion: cap/1
+  policyWarnings:
+    - field: network.allowOut.domain
+      state: unsupported
+      reason: "no name-based CNI policy and no L7 proxy in the egress path"
+      capabilityVersion: cap/1
+  auditEvents:
+    - event: policy_field_inert
+      field: network.allowOut.domain
+      state: unsupported
+---
+name: capability-besteffort-cannot-be-downgraded-by-request
+spec: overview.md §8.2.2 rule 2
+description: >
+  strict wins in merge. Without this rule any caller could switch off every field an
+  administrator's template relies on, which makes bestEffort a privilege-escalation
+  path rather than a portability escape.
+given:
+  sources:
+    template:
+      policy:
+        enforcement: strict
+    request:
+      policy:
+        enforcement: bestEffort     # attempts to downgrade
+  capabilities:
+    version: cap/1
+    default: enforced
+  clock: "2026-09-06T00:00:00Z"
+expect:
+  error:
+    status: 400
+    code: POLICY_CONFLICT
+    payload:
+      field: policy.enforcement
+      reason: cannot_downgrade_strict
+      source: template
+---
+name: capability-unevidenced-claim-reads-as-unsupported
+spec: overview.md §8.2.1 rules 5-6
+description: >
+  A declaration missing its evidence attributes must be treated as unsupported.
+  An unevidenced claim and no claim carry the same information, and the safe
+  reading of both is the same.
+given:
+  sources:
+    request:
+      policy:
+        filesystem:
+          denyPaths: ["/etc/shadow"]
+  capabilities:
+    version: cap/1
+    default: enforced
+    fields:
+      "filesystem.denyPaths":
+        state: enforced
+        # no enforcementPoint, provider, scope, or conformance attributes
+  clock: "2026-09-06T00:00:00Z"
+expect:
+  error:
+    status: 400
+    code: POLICY_UNSUPPORTED
+    payload:
+      field: filesystem.denyPaths
+      state: unsupported
+      reason: capability_declaration_missing_evidence
+      capabilityVersion: cap/1
+---
+name: capability-approximation-is-not-partial
+spec: overview.md §8.2.1 rule 4
+description: >
+  A read-only mount is not partial enforcement of denyPaths — it changes writability,
+  not visibility, so the credential file stays readable. A deployment offering only
+  that must declare unsupported, and a capability set claiming `partial` for it is
+  itself invalid.
+given:
+  sources:
+    request:
+      policy:
+        filesystem:
+          denyPaths: ["/home/agent/.aws"]
+  capabilities:
+    version: cap/1
+    default: enforced
+    fields:
+      "filesystem.denyPaths":
+        state: partial
+        enforcementPoint: mount
+        provider: runtime-mounts
+        providerVersion: "1.0"
+        scope: sandbox
+        knownLimitations:
+          - kind: reads_not_prevented       # the disqualifying admission
+        conformanceSuiteVersion: "0001/draft"
+        conformanceResult: pass
+  clock: "2026-09-06T00:00:00Z"
+expect:
+  error:
+    status: 400
+    code: INVALID_CAPABILITY_SET
+    payload:
+      field: filesystem.denyPaths
+      reason: >
+        partial must narrow the specified rule, not substitute a different one;
+        a limitation of reads_not_prevented on a deny rule is unsupported

@@ -195,16 +195,16 @@ policy:
      "dimension":  "llmTokens.total",  // 可选；缺省表示对该沙箱当前全部 hold 做出决定
      "window":     "month",            // 可选；与 dimension 一起缺省 → 该维度的全部 hold
      "decision":   "approve" | "deny",
-     "grant":      1000000,            // 仅 approve，可选：为当前窗口周期追加的额度
+     "allowance":  1000000,            // 仅 approve，可选：为当前窗口周期追加的额度
      "raiseLimit": 60000000            // 仅 approve，可选：对该沙箱持久提升限额
    }
    ```
 
-   - `approve` 恢复沙箱。`grant` 仅增加当前窗口周期的额度（翻转时失效）；`raiseLimit` 持久更新该沙箱的生效限额。
-   - 对 `lifetime` 窗口，grant 永不失效（lifetime 无翻转）：等价于对该沙箱剩余存在期的永久追加。
+   - `approve` 恢复沙箱。`allowance` 仅增加当前窗口周期的额度（翻转时失效）；`raiseLimit` 持久更新该沙箱的生效限额。
+   - 对 `lifetime` 窗口，allowance 永不失效（lifetime 无翻转）：等价于对该沙箱剩余存在期的永久追加。
    - `deny` 终止沙箱。
 4. 授权：审批**必须**经由控制面 API、由被授权管理该沙箱的已认证主体（属主/运维）执行。审批 API **不得**可在沙箱内部调用，也**不得**接受沙箱作用域凭据 —— 不可信的 Agent 代码必须无法批准自己的 hold。
-5. 每次审批**必须**审计：审批人身份、目标、决定，以及任何 grant/raise。
+5. 每次审批**必须**审计：审批人身份、目标、决定，以及任何 allowance/raise。
 6. held 沙箱仍适用标准空闲超时生命周期（空闲即 kill/pause），被遗弃的 hold 最终会被回收。
 
 ## 8. 通知
@@ -266,7 +266,7 @@ policy:
 
 临时的额外消耗在这里本来就是一等操作，而它与授权的形状不同：审批 API（§7.3）是由 **hold** 驱动的，因此人是在沙箱真正需要更多的那一刻、看着超限的计数器做决定的。而授权是在需求被证明之前签发的预先批准。给本模块加上授权，等于让同一个结果拥有两套机制，而其中一套丢掉了另一套所依赖的信息。
 
-> **术语提示。** 审批 API（§7.3）的 `grant` 字段早于 [overview.md](./overview.md) §5.1 的限时授权，二者是不同的东西：前者是加到窗口计数器上的一笔额度，自身没有 TTL —— 它在窗口翻转时失效，或者对 `lifetime` 而言永不失效。这处冲突是真实存在的，已作为开放问题记录（[overview.md](./overview.md) §11.7）。
+> **术语提示。** 审批 API（§7.3）的 `allowance` 字段刻意*不*叫 grant。它给一个窗口计数器增加余量、且自身没有 TTL —— 它在窗口翻转时失效，或者对 `lifetime` 而言永不失效 —— 这使它与 [overview.md](./overview.md) §5.1 的限时授权是不同的机制。两者曾一度都叫 `grant`；这个字段被改了名，而不是留着让一个词在同一个对象里表示两件事。
 
 ## 11. 错误
 
@@ -275,13 +275,13 @@ policy:
 | `INVALID_POLICY` | 400 | `{field, reason}` | 非正限额、非法窗口键、(0, 1] 之外的阈值。 |
 | `POLICY_RESOURCE_EXHAUSTED` | 终态 / 事件 | `{dimension, window, used, limit, action}` | 动作为 `kill`（或审批 `deny`）的超限。 |
 | `POLICY_RESOURCE_HELD` | 沙箱状态 / 事件 | `{dimension, window, used, limit}` | 沙箱处于待审批的 held 状态。 |
-| 审批错误 | 400 / 409 | `{reason}` | 审批目标不匹配任何当前 hold，或 grant/raise 非法。 |
+| 审批错误 | 400 / 409 | `{reason}` | 审批目标不匹配任何当前 hold，或 allowance/raise 非法。 |
 
 ## 12. 验收标准
 
 1. 多窗口执行：`llmTokens.total` 同时配置 `minute` 限额（动作 `pause`）与 `month` 限额（动作 `hold`）时，超过分钟限额的突发会暂停沙箱，分钟翻转后可恢复（并自动恢复）；越过月限额则 hold 等待审批。
 2. 翻转重整：minute 窗口重置后，在新限额内继续消耗不产生事件，直到新的阈值/超限跃迁。
-3. hold 必须有人：held 沙箱不随窗口翻转恢复；`approve`（无论是否带 grant/raise）恢复之；`deny` 终止之；额度为 N 的 grant 在当前周期内至多再放行 N 个单位。
+3. hold 必须有人：held 沙箱不随窗口翻转恢复；`approve`（无论是否带 allowance/raise）恢复之；`deny` 终止之；额度为 N 的 grant 在当前周期内至多再放行 N 个单位。
 4. 审批 API 拒绝以沙箱作用域凭据发起的调用。
 5. 阈值通知每阈值每窗口周期至多触发一次；超限与 hold 事件在每次跃迁时触发。
 6. lifetime 计数器单调，且即使无 lifetime 限额也上报。
@@ -304,7 +304,7 @@ policy:
 3. **自动恢复。** `pause` 是否应在翻转时自动恢复（本文提出 SHOULD），还是要求显式恢复？
 4. **webhook 认证。** HMAC 签名方案？共享密钥存放于何处？
 5. **审批 RBAC。** 哪些主体可以审批：仅沙箱属主、命名空间运维，还是任何集群管理员？
-6. **grant 可见性。** grant 是否应体现在 `resource.usage`（如 `allowance` 字段），便于平台对批准的超额计费？注意它与 [overview.md](./overview.md) §5.1 限时授权的命名冲突，已在那里作为 §11.7 跟踪 —— 无论最终哪个名字留下来，这个字段与那套机制都不得共用它。
+6. **额度可见性。** 已批准的额度是否应体现在 `resource.usage` 中，使平台可以为已批准的超额计费、并让运维能看出当前窗口里有多少是余量而不是预算？原先摆在这里的命名冲突已解决：这个字段叫 `allowance`，而 `grant` 只表示 [overview.md](./overview.md) §5.1 的限时策略放宽。
 7. **按窗口的动作。** `onExceeded` 是否应支持按窗口设置而非按维度（如同一维度 `minute`→`pause`、`month`→`hold`）？
 8. **恢复/克隆时的计数器继承。** 本文默认清零；继承是否应作为运维选项？
 9. **估算方法。** §5.3 固定了估算值的*性质*（下界、由已观测内容推导）而非算法。算法及其预期误差是否应当公开，使租户能审计自己用量中被估算的那一部分？

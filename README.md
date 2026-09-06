@@ -5,7 +5,7 @@
 
 This repository contains **Proposal 0001: Sandbox Security Policy** — a declarative, reusable, and safe-by-default policy framework for sandbox execution environments.
 
-A sandbox is not just a network endpoint. It runs partially trusted, agent-generated code, so its capability boundary must cover **network, filesystem, execution, process behavior, and resource** consumption in a single, unified object.
+A sandbox is not just a network endpoint. It runs partially trusted, agent-generated code, so its capability boundary must cover **network, filesystem, execution, process behavior, identity, and resource** consumption in a single, unified object.
 
 ---
 
@@ -19,9 +19,10 @@ This proposal defines the `SandboxPolicy` object: the equivalent of a cloud secu
 | **Filesystem** | Host-mount boundaries and in-sandbox path access policy (`denyPaths`, `readOnlyPaths`, `writableRoots`) |
 | **Exec** | Command allowlist/denylist, user restriction, timeout ceiling, concurrency limits, audit |
 | **Process** | Privilege gain, persistence, and system-call policy for already-running processes |
+| **Identity** | Workload identity, secret exposure modes, destination-bound credential injection, TTL and revocation |
 | **Resource** | CPU/memory quotas, bandwidth ceiling, windowed limits (minute–month + lifetime), LLM token accounting, exceed actions |
 
-The specification is organized as a six-document set under `specs/0001-sandbox-security-policy/`.
+The specification is organized as a seven-document set under `specs/0001-sandbox-security-policy/`, with a JSON Schema under `schema/` and conformance fixtures under `fixtures/`.
 
 ---
 
@@ -39,12 +40,12 @@ Sandboxes need exactly these properties — extended to the execution domain. Un
 | ECS Instance | Sandbox |
 | --- | --- |
 | Runs human-authored, trusted workloads | Runs agent-generated, partially trusted code |
-| Boundary = network reachability | Boundary = network **+ filesystem + exec + process + resource** |
+| Boundary = network reachability | Boundary = network **+ filesystem + exec + process + identity + resource** |
 | Blast radius: data exfiltration | Blast radius: exfiltration **+ credential theft, host-mount abuse, privilege escalation, runaway loops, token burn** |
 
 ### The gap today
 
-The five capability domains are at very different levels of maturity:
+The six capability domains are at very different levels of maturity:
 
 | Module | What exists today | Gap |
 | --- | --- | --- |
@@ -52,9 +53,10 @@ The five capability domains are at very different levels of maturity:
 | **Filesystem** | Host-mount prefix allowlist and `readOnly` per mount | No protection for sensitive in-sandbox paths; no path-level read-only/deny policy |
 | **Exec** | Per-request `timeout`, `user`, `cwd` | No sandbox-level command policy, user restriction, concurrency cap, or audit |
 | **Process** | Nothing user-facing | No policy surface for privilege gain, persistence, or system-call exposure |
+| **Identity** | Nothing | Credentials arrive as env vars or files, readable by any code in the sandbox; no workload identity, exposure mode, TTL, or revocation |
 | **Resource** | Steady-state CPU/memory quotas; idle timeout | No windowed limits, lifetime budgets, bandwidth ceiling, LLM token metering, or exceed actions |
 
-Without a single policy object, every module grows its own config style, merge rules, defaults, and audit format. Users must reason about five half-systems; template authors cannot say "this template's sandboxes are locked down" in one place; and future modules would add a sixth and seventh dialect.
+Without a single policy object, every module grows its own config style, merge rules, defaults, and audit format. Users must reason about six half-systems; template authors cannot say "this template's sandboxes are locked down" in one place; and future modules would add a seventh and eighth dialect.
 
 ### Why a unified policy?
 
@@ -80,6 +82,8 @@ The design is guided by six principles:
 
 ```
 .
+├── schema/0001/             # JSON Schema for SandboxPolicy
+├── fixtures/                # adapter-independent conformance fixtures
 └── specs/0001-sandbox-security-policy/
     ├── en/
     │   ├── overview.md      # Shared model, merge semantics, principles, tiers, shadow evaluation, grants, compatibility
@@ -87,6 +91,7 @@ The design is guided by six principles:
     │   ├── filesystem.md    # Filesystem sub-policy
     │   ├── exec.md          # Command execution sub-policy
     │   ├── process.md       # Privilege, persistence, and system-call sub-policy
+    │   ├── identity.md      # Workload identity, secret exposure, credential scope
     │   └── resource.md      # Resource limits, governance, and LLM token accounting
     └── zh/
         ├── overview.md      # 共享模型、合并语义、原则、分级、影子评估、限时授权、兼容性
@@ -94,6 +99,7 @@ The design is guided by six principles:
         ├── filesystem.md    # 文件系统子策略
         ├── exec.md          # 命令执行子策略
         ├── process.md       # 提权、持久化与系统调用子策略
+        ├── identity.md      # 工作负载身份、秘密暴露、凭据作用域
         └── resource.md      # 资源限制、治理与 LLM Token 计量
 ```
 

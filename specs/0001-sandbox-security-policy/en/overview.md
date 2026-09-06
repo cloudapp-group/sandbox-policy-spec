@@ -15,7 +15,7 @@ The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to be interpre
 
 ## 1. Summary
 
-Every cloud ECS instance ships with a security group: a declarative, reusable definition of *what the machine may talk to*. This proposal introduces the equivalent — and necessary superset — for CubeSandbox: a unified, declarative **Sandbox Security Policy** that defines the complete capability boundary of a single sandbox across five modules:
+Every cloud ECS instance ships with a security group: a declarative, reusable definition of *what the machine may talk to*. This proposal introduces the equivalent — and necessary superset — for CubeSandbox: a unified, declarative **Sandbox Security Policy** that defines the complete capability boundary of a single sandbox across six modules:
 
 | Module | Spec |
 | --- | --- |
@@ -23,6 +23,7 @@ Every cloud ECS instance ships with a security group: a declarative, reusable de
 | **Filesystem** — which paths inside and outside the sandbox may be read, written, or executed | [filesystem.md](./filesystem.md) |
 | **Exec** — which commands may run, as which user, for how long, and how many at once | [exec.md](./exec.md) |
 | **Process** — what an already-running process may do: privilege gain, persistence, and system calls | [process.md](./process.md) |
+| **Identity** — which credentials the sandbox may use, and in what form they reach it | [identity.md](./identity.md) |
 | **Resource** — steady-state quotas, windowed limits (minute–month + lifetime), and LLM token accounting | [resource.md](./resource.md) |
 
 A sandbox is not merely a network endpoint like an ECS instance. It is an **execution environment running partially trusted, agent-generated code**. Its "security group" must therefore govern not only network reachability, but also what that code can touch on disk, what it can execute, and how much it can consume — otherwise the boundary is incomplete.
@@ -54,6 +55,7 @@ The five modules are at very different levels of maturity today:
 | Filesystem | Host-mount prefix allowlist and per-mount `readOnly`. | No protection for sensitive paths *inside* the sandbox (`~/.ssh`, `~/.aws/credentials`, `/etc/shadow`); no path-level read-only/deny policy; the prefix allowlist is not part of the user-facing policy API. |
 | Exec | Per-request `timeout`, `user`, `cwd` on command execution. | No sandbox-level policy: no command allowlist/denylist, no user restriction, no concurrency cap, no wall-clock ceiling, no audit trail. |
 | Process | Nothing user-facing. Process and PID isolation between sandboxes is a property of the substrate (§12.3), not something a policy can state. | No policy surface at all: privilege gain, persistence, and system-call exposure cannot be constrained declaratively, even though the enforcement mechanisms already exist below the API — [filesystem.md](./filesystem.md) §11 already contemplates "equivalent syscall-level enforcement". |
+| Identity | Nothing. Credentials reach the sandbox as environment variables or files, where any code in it can read them. | No policy surface: no workload identity, no destination-bound injection, no exposure mode, no TTL or revocation. [filesystem.md](./filesystem.md) §2.3 of the defense matrix already concedes that `denyPaths` cannot protect a secret already in process memory or an env var — which is where secrets currently are. |
 | Resource | Steady-state CPU/memory quotas; idle timeout with kill/pause. | No windowed limits (minute–month) or lifetime budgets; no bandwidth ceiling; no LLM token metering; no exceed actions, notifications, or human-approval flow. |
 
 ### 2.2 Why a unified object
@@ -77,6 +79,7 @@ No single module is a boundary on its own. Each answers a specific threat, and t
 | **Filesystem** | In-sandbox credential theft; host-mount abuse | Every filesystem access by **every** process | Secrets already in process memory or passed as env vars |
 | **Resource** | Runaway loops, token burn, noisy-neighbour effects | Kernel accounting + outbound HTTP metering, per sandbox | Actions that are harmful but cheap |
 | **Process** | Privilege gain, unwanted persistence, and syscall-surface abuse by processes the workload started **itself** | Every process the sandbox runs, at the kernel boundary | What a process may legitimately do within the privileges it was granted |
+| **Identity** | Theft and reuse of long-lived credentials by code inside the sandbox | The credential issuance and egress-proxy path outside the sandbox | A credential the workload legitimately used within its scope, for the duration of that scope |
 | **Exec** | Injected or mistaken commands arriving **through the control interface** | Only executions initiated through the sandbox control interface | Processes the workload starts on its own |
 
 The asymmetry in the last row is deliberate and load-bearing:
@@ -99,7 +102,7 @@ Detection and response is a legitimate and complementary capability. It belongs 
 
 ## 3. Document set
 
-This proposal is a set of six documents. This overview defines the shared object model, merge semantics, error model, and compatibility rules that all module specs build on. Each module spec is a standalone, normative specification of one domain.
+This proposal is a set of seven documents. This overview defines the shared object model, merge semantics, error model, and compatibility rules that all module specs build on. Each module spec is a standalone, normative specification of one domain.
 
 | Document | Scope |
 | --- | --- |
@@ -108,6 +111,7 @@ This proposal is a set of six documents. This overview defines the shared object
 | [filesystem.md](./filesystem.md) | Host-mount boundary, in-sandbox path access policy |
 | [exec.md](./exec.md) | Command execution policy |
 | [process.md](./process.md) | Privilege gain, persistence, and system-call policy for running processes |
+| [identity.md](./identity.md) | Workload identity, secret exposure modes, destination binding, credential TTL and revocation |
 | [resource.md](./resource.md) | Quotas, windowed limits (minute–month + lifetime), LLM token accounting, exceed actions, hold & approval, notifications |
 
 ## 4. Shared object model
@@ -123,21 +127,25 @@ flowchart LR
     S --> D2["filesystem"]
     S --> D3["exec"]
     S --> D4["process"]
-    S --> D5["resource"]
+    S --> D5["identity"]
+    S --> D6["resource"]
 ```
 
-**SandboxPolicy** — a declarative object with a tier and five sub-policies. Every field is optional; an absent sub-policy means "server-side default" (§7), never "unrestricted".
+**SandboxPolicy** — a declarative object with a tier and six sub-policies. Every field is optional; an absent sub-policy means "server-side default" (§7), never "unrestricted".
 
 ```yaml
 policy:
-  tier:        baseline | restricted | unrestricted   # default: baseline — see §7.1
+  tier:        compatibility | baseline | restricted | unrestricted
+                         # default when policy is present: restricted — see §7
   tierVersion: string    # e.g. "tier/1"; default: platform default — see §7.1.7
-  auditTier:   baseline | restricted | unrestricted   # optional; shadow-only — see §7.2
+  auditTier:   compatibility | baseline | restricted | unrestricted
+                         # optional; shadow-only — see §7.2
   enforcement: strict | bestEffort   # default: strict — see §8.2
   network: { ... }       # see network.md
   filesystem: { ... }    # see filesystem.md
   exec: { ... }          # see exec.md
   process: { ... }       # see process.md
+  identity: { ... }      # see identity.md
   resource: { ... }      # see resource.md
 ```
 
@@ -171,14 +179,34 @@ GET /policies/{id}/revisions/{rev}          one immutable profile revision
 
 This is what makes profile reuse auditable: "already-running sandboxes pick up the change, where the module supports it" is observable precisely because each pickup is a new version with a snapshot. A module that cannot hot-update says so in its own spec; it MUST NOT silently diverge from the version it reports.
 
+### 4.2 Concurrency and atomicity
+
+A version number records what happened; it does not prevent two callers from happening at once. Profile updates, grant expiry, resource approvals, and runtime policy patches are all mutations of the same effective policy, and they can overlap. Without a compare-and-swap the last writer wins silently, which for a security boundary means a narrowing can be lost without anyone seeing an error.
+
+1. Every mutating policy operation MUST accept an `expectedPolicyVersion` (for sandbox-scoped changes) or `expectedRevision` (for profile changes), and MUST reject a mismatch with `409 POLICY_VERSION_CONFLICT` carrying the current value. Where the transport has one, an `ETag` / `If-Match` pair MAY carry the same information.
+2. A mutation that omits the expected version MUST be rejected under `enforcement: strict`. Blind writes to a security boundary are not a convenience worth the failure mode they enable.
+3. Each mutation MUST be **atomic across fields**. A request that sets three fields either takes effect as one new `effectivePolicyVersion` or has no effect. A partially applied policy is a configuration nobody wrote.
+4. Mutating operations MUST accept an idempotency key and MUST return the original outcome on a repeat, so that a retried grant issuance does not produce two grants with two expiry times.
+5. Snapshots MUST be totally ordered by `effectivePolicyVersion` for a given sandbox. Concurrent mutations may interleave in wall-clock time, but the version sequence MUST NOT have gaps or duplicates.
+
+**When a tightening takes effect** is a separate question from when it is recorded, and the answer differs by module. Each module spec MUST state, for a narrowing applied at runtime, what happens to work already in flight: established connections, running processes, and open sessions. This is the per-module half of §11.2, and a module that cannot answer it cannot accept grants (§5.1.5) — because a grant that expires without closing what it opened has not expired in any sense that matters.
+
+### 4.3 `status`: what the platform commits to
+
+The effective policy, its version, its sources, the resolved capability set (§8.2), and the list of inert fields are all platform-computed. Together they answer a different question from the request body: not *what did I submit* but **what does the system actually promise**.
+
+1. All of it MUST be exposed as read-only platform-generated state. A request MUST NOT be able to set, influence, or forge any of it; a submitted value in a read-only field MUST be rejected with `400 INVALID_POLICY` rather than ignored.
+2. It MUST include at minimum: the resolved policy, its `effectivePolicyVersion`, a content hash of the resolved policy, `policySources` with revisions, the resolved `tier` and `tierVersion`, the capability set version, every `unsupported` or `partial` field (§8.2.3), and every active grant with its remaining TTL (§5.1.6).
+3. The content hash MUST be computed over a canonical serialization, so two deployments that resolved the same policy produce the same hash. The canonicalization rules are part of the machine-readable schema (§11.16) rather than prose, because a hash defined in prose is a hash nobody can reproduce.
+
 ## 5. Shared merge semantics
 
 When more than one policy source is present, the effective policy is computed once, at create time, by the following rules. Module specs define per-field refinements.
 
 | Aspect | Rule |
 | --- | --- |
-| Source precedence | Inline request policy > referenced profile > template default. |
-| `tier` | The most restrictive tier wins: `restricted` > `baseline` > `unrestricted` (§7.1). |
+| Source precedence | Inline request policy > referenced profile > template default. Which principals may contribute each source is defined in §5.2. |
+| `tier` | The most restrictive tier wins: `restricted` > `baseline` > `compatibility` > `unrestricted` (§7.1). |
 | `tierVersion` | The latest pinned version wins. Since a new tier version may only tighten what a tier expands to (§7.1.7), latest is also most restrictive. |
 | `auditTier` | The most restrictive `auditTier` wins, and it is evaluated against the merged `tier` (§7.2). A shadow evaluation observes more; it never enforces, so widening it cannot widen the boundary. |
 | Scalar fields | Explicit higher-precedence value overrides lower; absent keeps the lower value. |
@@ -224,32 +252,75 @@ GET    /sandboxes/{id}/grants              list active grants with remaining TTL
 DELETE /sandboxes/{id}/grants/{grantID}    revoke early
 ```
 
-> **Terminology.** This `grant` — a time-bounded policy relaxation — is not the `grant` field of the resource approval payload ([resource.md](./resource.md) §7.3), which adds an *allowance* to a usage counter. The two are unrelated mechanisms that unfortunately share an English word; whether the resource field should be renamed to `allowance` is open question §11.7.
+> **Terminology.** This `grant` — a time-bounded policy relaxation — is the only thing this document calls a grant. The resource approval payload uses `allowance` for the different concept of adding headroom to a usage counter ([resource.md](./resource.md) §7.3); the two were briefly given the same name, and the resource field was renamed rather than left to collide.
+
+### 5.2 Authority: who may contribute a source
+
+§5 says how sources combine. It does not say who is entitled to be one, and merge rules alone cannot answer that: an algorithm that correctly computes "template restrictions cannot be widened by the request" is worth nothing if any caller can publish the template. Precedence and eligibility are one question and belong in one place.
+
+Five principal roles are distinguished. A deployment MAY map several onto one identity, but MUST NOT collapse the **operator** and **caller** rows, because that erases the boundary every other rule in §5 depends on.
+
+| Principal | What it is |
+| --- | --- |
+| **Operator** | The party running the platform. Sets deployment-wide bounding constraints such as the host-mount allowlist ([filesystem.md](./filesystem.md) §4.4.4) and the maximum grant TTL. |
+| **Tenant admin** | Owns a tenant or namespace. Manages Policy Profiles within it. |
+| **Template publisher** | Publishes templates carrying default policy. |
+| **Sandbox caller** | Creates sandboxes, supplying inline policy and a `policyID`. |
+| **Workload identity** | The sandbox itself, from the inside. Holds no policy authority at all — see rule 5. |
+
+| Operation | Operator | Tenant admin | Template publisher | Caller | Workload |
+| --- | --- | --- | --- | --- | --- |
+| Set deployment bounding constraints | ✔ | ✘ | ✘ | ✘ | ✘ |
+| Create / update a Policy Profile | ✔ | ✔ (own tenant) | ✘ | ✘ | ✘ |
+| Publish a template default policy | ✔ | ✔ | ✔ (own templates) | ✘ | ✘ |
+| Reference a profile by `policyID` | ✔ | ✔ | ✔ | ✔ (readable profiles) | ✘ |
+| Supply inline request policy | ✔ | ✔ | ✔ | ✔ | ✘ |
+| Issue or revoke a grant (§5.1) | ✔ | ✔ | ✘ | Deployment-configured | ✘ |
+| Approve a resource hold ([resource.md](./resource.md) §7.4) | ✔ | ✔ | ✘ | Deployment-configured | ✘ |
+| Read the effective policy and its snapshots | ✔ | ✔ | ✔ (own templates) | ✔ (own sandboxes) | Resolved policy only |
+| Read the audit stream | ✔ | ✔ (own tenant) | ✘ | Deployment-configured | ✘ |
+
+1. **A source's provenance is the role that supplied it**, not a field in the request. `template`, `profile`, and `request` provenance (§4.6 of [network.md](./network.md)) MUST be assigned by the platform from the authenticated principal. A caller MUST NOT be able to label its own contribution as template provenance, since binding denies rest on that distinction.
+2. **A profile reference is not a privilege escalation.** A caller that may reference a profile it cannot edit gets that profile's restrictions; it does not thereby gain the tenant admin's ability to change them.
+3. **Delegated authority MUST NOT exceed its parent.** Where a deployment issues scoped credentials — a child key, a service account, a CI token — the derived principal's policy authority MUST be a subset of the issuer's. This is the same narrow-only rule §5 applies to policy content, applied to authority over it.
+4. **Cross-tenant references MUST be rejected**, not silently ignored. A `policyID` naming another tenant's profile MUST fail with `403`; resolving it to the default would produce a sandbox whose effective policy differs from the one its author read.
+5. **The workload has no authority, and this is load-bearing.** Code inside the sandbox MUST NOT be able to create profiles, issue grants, approve holds, or modify its own effective policy, and sandbox-scoped credentials MUST NOT be accepted on any of those endpoints — the condition §5.1.1 already states for grants, generalized. It MAY read its own resolved policy, so that a well-behaved agent can adapt instead of failing blindly; it MUST NOT read the audit stream, which would let it observe which of its probes were noticed.
+6. **Every authority decision is audited** on the same terms as the policy changes it authorizes: who, what, when, and the version it produced.
+
+`break-glass` access — an operator bypassing the above during an incident — is deliberately not specified here. It is a real operational need and a real escalation path, and it belongs in the same conversation as the deployment's own incident tooling; §11.17 records it rather than inventing it.
 
 ## 6. Shared principles
 
 1. **Declarative.** The policy states intent. It does not reference mechanisms, components, or configuration paths.
 2. **Absent ≠ unrestricted.** An absent sub-policy or field resolves to the server-side default, which is itself a documented, safe value.
-3. **Safe by default, explicit opt-out.** Baseline protections are on by default; opting out is a positive, visible act (e.g. `mode: unrestricted`), never a side effect of omission.
+3. **Safe by default, explicit opt-out.** Baseline protections are on by default; opting out is a positive, visible act (e.g. `mode: unrestricted`), never a side effect of omission. "Default" here means the default for a **policy that is present**: a `policy` object without a `tier` resolves to `restricted` (§7). Requests carrying no `policy` at all travel the legacy path and resolve to `compatibility`, which is *not* a safe default and does not claim to be (§7.1).
 4. **Denials are explainable.** Every denial carries the reason (matched rule, resource dimension, exceeded limit) in a structured form so that callers and agents can react programmatically.
 5. **Enforcement is mandatory, not advisory.** Every rule in the module specs is enforced at a point the sandbox workload cannot bypass. Where a rule cannot be enforced mandatorily, the spec says so explicitly instead of pretending. This principle has exactly one configurable exception — `policy.enforcement: bestEffort` (§8.2), for deployments whose runtime cannot enforce a field at all — and that exception is fenced, defaulted off, and visible in the effective policy for the same reasons a time-bounded grant is (§5.1).
 6. **One representation downstream.** Regardless of how a policy was expressed (legacy fields, inline policy, profile), the effective policy is computed once and exposed as one object.
 
 ## 7. Shared defaults
 
-Defaults follow the "safe by default" principle. Which set of defaults applies is selected by `policy.tier` (§7.1); the table below is the `baseline` tier, which is the default. Exact values are normative in each module spec.
+Which set of defaults applies is selected by `policy.tier` (§7.1). Two rules decide which tier a request gets, and keeping them apart is what lets this object be safe by default without breaking the existing API:
 
-| Module | Default baseline | Opt-out |
+| The request | Resolved tier | Rationale |
 | --- | --- | --- |
-| Network | Today's behavior: internet egress allowed, with built-in private-CIDR denies. | `allowInternetAccess: false`. |
-| Filesystem | Sensitive credential paths denied — versioned baseline set `baseline/1` (`~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc/shadow`, ...). | `mode: unrestricted` for all of it, or `baselineExceptions` for named paths. |
-| Exec | `unrestricted` mode with a wall-clock timeout ceiling. | Allowlist mode. |
-| Process | Escape-adjacent system calls denied — versioned syscall baseline set `syscall/1`. Privilege gain and backgrounding are permitted, because both are common in legitimate images. | `mode: unrestricted`. |
-| Resource | Quota defaults from template; no windowed limits. | Explicit limits. |
+| Carries a `policy` object with no `tier` | **`restricted`** | A caller who reached for this object asked for a boundary. Handing them the permissive tier would answer a question they did not ask. |
+| Carries no `policy` at all — legacy fields only, or nothing | **`compatibility`** | The E2B-compatible surface must behave exactly as it does today (§9), and it does so under a tier that is named for what it is. |
+
+The table below is the `restricted` tier, the default for any policy that is present. Exact values are normative in each module spec.
+
+| Module | Default (`restricted`) | Opt-out |
+| --- | --- | --- |
+| Network | Deny-all egress, no public ingress: only named `allowOut`, `portRules`, and L7 destinations pass. | `allowInternetAccess: true`, `ingress.allowPublicTraffic: true`, or `tier: baseline`. |
+| Filesystem | Sensitive credential paths denied — versioned baseline set `baseline/1` (`~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc/shadow`, ...); mounts arrive read-only. | `mode: unrestricted`, `baselineExceptions` for named paths, or `mounts.defaultReadOnly: false`. |
+| Exec | `unrestricted` mode with a wall-clock timeout ceiling, plus metadata auditing. | Allowlist mode is stricter; `audit: none` opts out of the audit trail. |
+| Process | Escape-adjacent system calls denied (`syscall/1`), no privilege gain, no root, no backgrounding. | `noNewPrivileges: false`, `runAsNonRoot: false`, `allowDaemonize: true`, or `mode: unrestricted`. |
+| Identity | No secret reaches the sandbox in a form its code can read ([identity.md](./identity.md) §6). | An explicit `exposure` mode per secret. |
+| Resource | Quota defaults from the template; no windowed limits; `onExceeded: hold`. | Explicit limits and a different action. |
 
 ### 7.1 Policy tiers
 
-Operators asked the same question for every module: *"just give me a locked-down sandbox."* Answering it per module means five independent decisions and five chances to forget one. `policy.tier` answers it once.
+Operators asked the same question for every module: *"just give me a locked-down sandbox."* Answering it per module means six independent decisions and six chances to forget one. `policy.tier` answers it once.
 
 ```yaml
 policy:
@@ -273,20 +344,36 @@ The tier is a **default selector and nothing more**. This restraint is what keep
 
 Expansion, as published in `tier/1`:
 
-| Module | `tier: baseline` | `tier: restricted` |
-| --- | --- | --- |
-| Network | `allowInternetAccess: true`, built-in private-CIDR denies | `allowInternetAccess: false` (deny-all egress; only explicit `allowOut`, port/protocol rules, and L7 destinations pass), `ingress.allowPublicTraffic: false` |
-| Filesystem | `mode: baseline`, `baseline/1` | `mode: baseline`, `mounts.defaultReadOnly: true` |
-| Exec | `mode: unrestricted`, `maxTimeoutSec: 3600` | `mode: unrestricted`, `maxTimeoutSec: 3600`, `audit: metadata` |
-| Process | `mode: baseline`, `syscall.mode: baseline` | `mode: baseline`, `syscall.mode: baseline`, `noNewPrivileges: true`, `runAsNonRoot: true`, `allowDaemonize: false`, `audit: metadata` |
-| Resource | template quotas, no windowed limits | template quotas, `onExceeded: hold` |
+| Module | `tier: compatibility` | `tier: baseline` | `tier: restricted` |
+| --- | --- | --- | --- |
+| Network | `allowInternetAccess: true`, `ingress.allowPublicTraffic: true`, built-in private-CIDR denies | `allowInternetAccess: true`, `ingress.allowPublicTraffic: false` | `allowInternetAccess: false` (deny-all egress; only explicit `allowOut`, port/protocol rules, and L7 destinations pass), `ingress.allowPublicTraffic: false` |
+| Filesystem | `mode: baseline`, `baseline/1` | `mode: baseline`, `baseline/1` | `mode: baseline`, `mounts.defaultReadOnly: true` |
+| Exec | `mode: unrestricted`, `maxTimeoutSec: 3600` | `mode: unrestricted`, `maxTimeoutSec: 3600` | `mode: unrestricted`, `maxTimeoutSec: 3600`, `audit: metadata` |
+| Process | `mode: baseline`, `syscall.mode: baseline` | `mode: baseline`, `syscall.mode: baseline` | `mode: baseline`, `syscall.mode: baseline`, `noNewPrivileges: true`, `runAsNonRoot: true`, `allowDaemonize: false`, `audit: metadata` |
+| Identity | `mode: unrestricted` | `mode: managed` | `mode: managed`, `defaultExposure: proxy` |
+| Resource | template quotas, no windowed limits | template quotas, no windowed limits | template quotas, `onExceeded: hold` |
 
-`tier: unrestricted` expands to each module's documented opt-out — `network.allowInternetAccess: true` with no added denies beyond the built-ins (which no tier can lift), `filesystem.mode: unrestricted`, `exec.mode: unrestricted`, `process.mode: unrestricted`. It is the tier for trusted, human-authored workloads, and every use of it is visible in the effective policy and its snapshot.
+`tier: unrestricted` expands to each module's documented opt-out — `network.allowInternetAccess: true` with no added denies beyond the built-ins (which no tier can lift), `filesystem.mode: unrestricted`, `exec.mode: unrestricted`, `process.mode: unrestricted`, `identity.mode: unrestricted`. It is the tier for trusted, human-authored workloads, and every use of it is visible in the effective policy and its snapshot.
 
-Two consequences worth stating plainly rather than discovering later:
+**Ordering.** From most to least restrictive: `restricted` > `baseline` > `compatibility` > `unrestricted`. The most restrictive tier wins in merge (§5). `compatibility` sits *below* `baseline` because it is the only tier that leaves public ingress on.
 
-- **`restricted` does not narrow `exec.mode`, and that is deliberate.** `allowlist` requires a non-empty `allowedCommands` ([exec.md](./exec.md) §5), so a tier that selected it would make `tier: restricted` alone fail validation — the one-field promise broken by the one field. The deeper reason is that it would buy nothing: `exec` is a control-interface gate, not a containment boundary, and an allowlist admitting an interpreter bounds almost nothing ([exec.md](./exec.md) §3.6). What `restricted` actually restricts lives in `network`, `filesystem`, and `process`, which enforce below the control interface. The tier turns on `exec` auditing, because that is the part it can supply without inventing the caller's command list. The same restraint applies wherever a tier would have to guess a workload-specific value: `filesystem.writableRoots` ([filesystem.md](./filesystem.md) §6.5) and every `resource` budget ([resource.md](./resource.md) §6) are left alone for this reason. A tier that guesses is a tier that breaks workloads for a posture it did not improve.
+Three consequences worth stating plainly rather than discovering later:
+
+- **`restricted` does not narrow `exec.mode`, and that is deliberate.** `allowlist` requires a non-empty `allowedCommands` ([exec.md](./exec.md) §5), so a tier that selected it would make `tier: restricted` alone fail validation — the one-field promise broken by the one field. The deeper reason is that it would buy nothing: `exec` is a control-interface gate, not a containment boundary, and an allowlist admitting an interpreter bounds almost nothing ([exec.md](./exec.md) §3.6). What `restricted` actually restricts lives in `network`, `filesystem`, `process`, and `identity`, which enforce below the control interface. The tier turns on `exec` auditing, because that is the part it can supply without inventing the caller's command list. The same restraint applies wherever a tier would have to guess a workload-specific value: `filesystem.writableRoots` ([filesystem.md](./filesystem.md) §6.5) and every `resource` budget ([resource.md](./resource.md) §6) are left alone for this reason. A tier that guesses is a tier that breaks workloads for a posture it did not improve.
 - The tier values `baseline` and `unrestricted` deliberately reuse the words used by `filesystem.mode`, `exec.mode`, and `process.mode`. They live at different levels and do different jobs: the tier is policy-level and only selects defaults, while a module `mode` is a module field and is enforced. Where both are present, rule 3 applies — the explicit module field wins.
+- **`compatibility` is reachable explicitly, and that is on purpose.** It exists for the legacy path (§7), but a caller migrating to `policy` may need one release cycle at today's behaviour before tightening. Writing `tier: compatibility` gets it, and unlike the old silent default it appears in the effective policy, in the snapshot, and in the audit trail — so "this fleet is still on the permissive tier" is a query rather than an assumption.
+
+**`compatibility` is not a safe default, and this document does not describe it as one.**
+
+Before this revision the default tier permitted internet egress **and** public ingress while §6 principle 3 called the object safe by default. Those two statements cannot both be true. A sandbox reachable from the public internet by default is an availability default, not a security one, and describing it otherwise gives adopters a false picture of their exposure surface — which is worse than the exposure itself, because it removes the reason to look.
+
+The split in §7 resolves it without breaking anyone:
+
+1. `compatibility` is named for its purpose and **makes no safety claim.** It is the tier a legacy request resolves to, so today's callers see exactly today's behaviour (§9).
+2. A policy that is *present* defaults to `restricted`. Someone who writes `policy:` gets a boundary, because that is what the object is for.
+3. `baseline` remains available as the middle ground — internet egress on, public ingress off — for workloads that need to fetch dependencies but should never be dialled into. Public ingress is the more dangerous of the two defaults and has far weaker compatibility justification, which is why `baseline` drops it and `compatibility` is the only tier that keeps it.
+
+Deployments MUST NOT describe `compatibility` as a secure configuration in their own documentation, and the platform **SHOULD** surface its use in whatever inventory it exposes to operators. A permissive tier that nobody can count is the state this section exists to end.
 
 ### 7.2 Shadow evaluation (`auditTier`)
 
@@ -314,7 +401,7 @@ Shadow evaluation is deliberately **not** a general dry-run of an arbitrary poli
 
 ## 8. Shared error model
 
-- All policy errors use the `POLICY_` prefix: `POLICY_NETWORK_*`, `POLICY_FS_*`, `POLICY_EXEC_*`, `POLICY_PROCESS_*`, `POLICY_RESOURCE_*`, `POLICY_GRANT_*`, `POLICY_UNSUPPORTED`.
+- All policy errors use the `POLICY_` prefix: `POLICY_NETWORK_*`, `POLICY_FS_*`, `POLICY_EXEC_*`, `POLICY_PROCESS_*`, `POLICY_RESOURCE_*`, `POLICY_GRANT_*`, `POLICY_UNSUPPORTED`, `POLICY_VERSION_CONFLICT`.
 - Policy **configuration** errors (invalid, conflicting, over-limit) are reported at create/update time as HTTP `400` with code `INVALID_POLICY` and a machine-readable `field` pointer.
 - Policy **enforcement** errors are reported to the operation that was denied, as structured errors carrying the matched rule name or exhausted dimension. Exceptions: filesystem and process enforcement surface as standard OS error codes (`EACCES`/`EROFS`, `EPERM`) because they apply below the API layer.
 - Every module defines its error codes and their payloads in its spec.
@@ -403,6 +490,18 @@ A policy that names a field the deployment cannot enforce is the exact situation
    | `partial` | The field is enforced, but with a documented narrower scope than the module specifies. The narrowing MUST be described, not merely flagged. |
    | `unsupported` | The field has no enforcement whatsoever on this deployment. |
 4. `partial` MUST NOT be used to cover an approximation that changes what the field means. Realizing `denyPaths` as a read-only mount is not partial enforcement of a deny, it is a different rule with a similar name; realizing a domain allow-entry by resolving it once at create time and pinning the address is not partial enforcement of a domain policy, it is an IP policy. Either the field is enforced as specified, narrower but honestly described, or `unsupported`. An approximation reported as enforcement is the failure mode §8.1.2 rejects for `warn`, arriving through a different door.
+5. **A declaration is a claim, and a claim needs evidence.** A self-reported `enforced` tells a reader that the platform intends to enforce a field, not that any mechanism does. Each declared field MUST therefore carry:
+
+   | Attribute | Why it is required |
+   | --- | --- |
+   | `enforcementPoint` | Where the rule is actually applied — kernel filter, CNI datapath, egress proxy, control plane. Two deployments claiming `enforced` at different points offer materially different guarantees against a workload that can reach past one of them. |
+   | `provider` and `providerVersion` | The component and version doing the enforcing. "Enforced by a CNI" is unfalsifiable; "enforced by *this* CNI at *this* version" can be checked against known limitations. |
+   | `scope` | The unit the enforcement covers — process, sandbox, or network namespace. §4.9 of [network.md](./network.md) exists because these differ. |
+   | `knownLimitations` | Structured, not free text. For `partial`, this is where the narrowing from rule 3 lives, and it MUST be machine-readable so a caller can decide programmatically whether the gap matters to it. |
+   | `conformanceSuiteVersion` and `conformanceResult` | Which version of the conformance suite (§11.16) the deployment ran, and its outcome. This is the difference between a claim and a tested claim. |
+
+6. A capability set that omits any attribute in rule 5 for a field it declares `enforced` or `partial` MUST be treated by clients as `unsupported` for that field. An unevidenced claim and no claim carry the same information, and the safe reading of both is the same.
+7. The capability set MUST be published for the deployment as a whole *and* resolvable per sandbox, because a node's kernel, CNI, or runtime class can differ from the fleet's. The per-sandbox value is what §4.3 records and what a snapshot preserves.
 
 ```
 GET /capabilities        the enforcement capability set and its version
@@ -443,12 +542,40 @@ Under `bestEffort`, for every field resolved to `unsupported` or `partial`:
 - **Shadow evaluation** (§7.2) of an `unsupported` field produces nothing, and MUST say so rather than reporting a clean result. A shadow report that is empty because nothing was evaluated is indistinguishable, to a reader, from one that is empty because nothing was violated — and those are opposite conclusions. The shadow report MUST therefore carry the same inert-field list as §8.2.3.
 - **Grants** (§5.1) against an `unsupported` field MUST be rejected with `400 POLICY_GRANT_INVALID`. Granting a temporary relaxation of a restriction that was never in force is a no-op that produces an audit trail implying otherwise, which is worse than the error.
 
+### 8.3 Lifecycle: what policy survives clone, restore, and pause
+
+Least privilege computed at create time can be undone by an operation that copies the sandbox. A snapshot taken while a grant was active, restored a week later, reproduces the widened boundary with none of the conditions that justified it — and no error, because from the platform's point of view it faithfully restored what it recorded. The safe defaults below are normative; the remaining detail is §11.5.
+
+| Carried by a clone or restore | Default | Why |
+| --- | --- | --- |
+| Resolved policy and `tier` | **Inherited** | It is the boundary the sandbox was created with; dropping it would leave the restored sandbox less constrained. |
+| `tierVersion`, `baselineVersion`, capability set version | **Inherited, and recorded** | A restore that silently upgrades to today's versions changes the boundary without a policy update. |
+| Profile reference (`policyID`) | **Inherited by reference, re-resolved** | The restored sandbox gets the profile's *current* revision, and the new `effectivePolicyVersion` records which. Pinning the old revision instead is a deployment choice that MUST be recorded either way. |
+| **Active grants** (§5.1) | **NOT inherited** | A grant is scoped to a task that no longer exists. Inheriting one is a silent widening with no approver and no reason attached. |
+| **Public ingress exposure** | **NOT inherited** | Reachability granted to one sandbox instance is not a property of its filesystem image. A restored sandbox starts unexposed and must be exposed again explicitly. |
+| **Secret bindings** ([identity.md](./identity.md)) | **NOT inherited** | Credentials are issued to a workload instance for a bounded period. A restore that reproduces them extends their life past every TTL that governed them. |
+| Accumulated usage counters ([resource.md](./resource.md) §4.2) | Deployment-configured, and MUST be recorded | Both readings are defensible — a clone is a new consumer, or a clone continues the parent's budget — but an unstated choice makes a lifetime limit meaningless. |
+
+1. Every clone, restore, or resume MUST produce a new `effectivePolicyVersion` and an immutable snapshot (§4.1.4), naming the source sandbox or snapshot. The lineage MUST be reconstructible.
+2. A snapshot MUST NOT include the contents of a path that `denyPaths` denied at the time it was taken. Otherwise `denyPaths` protects a file from the workload while shipping it out in an image, which is a boundary in name only. Where a deployment cannot exclude such paths, it MUST declare snapshotting `unsupported` for policies that set `denyPaths` (§8.2) rather than take the snapshot anyway.
+3. A **paused** sandbox retains its policy. Resuming MUST re-resolve the policy and MUST NOT resume with a boundary looser than a create-time evaluation would produce now — otherwise pause becomes a way to hold a stale, wider boundary indefinitely.
+4. Where a snapshot is restored into a deployment whose capability set no longer covers a field the original policy relied on, the restore is subject to §8.2.2 exactly as a create is: rejected under `strict`, inert-and-reported under `bestEffort`. A restore is not a privileged path.
+
 ## 9. Compatibility
 
 - **E2B parity:** the E2B-compatible surface (`allow_internet_access`, `network{}`) is untouched. Requests without `policy` behave exactly as today; internally they are normalized to the default policy, which becomes the single representation downstream (principle 6).
 - **Conflict policy:** a request that supplies *both* a legacy field and the corresponding `policy.*` sub-policy MUST be rejected with `400 POLICY_NETWORK_CONFLICT` (or the module-specific conflict code) rather than silently guessing precedence.
 - **Templates:** existing templates gain a default policy equivalent to their current behavior. Zero behavior change.
-- **Tiers:** an absent `tier` resolves to `baseline`, whose expansion is today's behavior for `network`, `exec`, and `resource`. `filesystem` and `process` baselines additionally deny things no compatible workload should depend on — credential paths and escape-adjacent system calls. Those two are the deliberate, documented exceptions to "zero behavior change", and both are versioned sets (`baseline/1`, `syscall/1`) so the exception is inspectable and pinnable rather than rolling.
+- **Tiers:** a request with no `policy` object resolves to `compatibility`, whose expansion is today's behavior for `network`, `exec`, and `resource` (§7). `filesystem` and `process` still deny things no compatible workload should depend on — credential paths and escape-adjacent system calls — and both are versioned sets (`baseline/1`, `syscall/1`) so the exception is inspectable and pinnable rather than rolling. Those two remain the deliberate, documented exceptions to "zero behavior change" for legacy callers.
+- **The default tier for a present `policy` is `restricted`, and this is a breaking change from the previous revision of this document.** A policy that wrote `policy: {}` and relied on permissive network defaults will now resolve to deny-all egress and no public ingress. This is intentional — the previous default could not be reconciled with principle 3 (§7.1) — but it is a real migration, so it is spelled out rather than buried:
+
+  | Before | Now | To keep the old behaviour |
+  | --- | --- | --- |
+  | No `policy` field | Unchanged: `compatibility` | Nothing to do |
+  | `policy: {}` or `policy` without `tier` | `restricted` | Write `tier: compatibility` or `tier: baseline` explicitly |
+  | `policy` with an explicit `tier` | Unchanged | Nothing to do |
+
+  Deployments **SHOULD** run `auditTier: restricted` against their existing fleet before adopting the new default (§7.2), which reports exactly which sandboxes the change would have constrained, without constraining any. The tier is also pinnable: `tierVersion` fixes what each tier expands to (§7.1.7), so a deployment can adopt the new default value without also inheriting future tightenings of it.
 - **Tier versions:** an absent `tierVersion` resolves to the platform default, recorded in the effective policy. Since a new tier version may only tighten (§7.1.7), pinning is how a deployment declines a future tightening — not how it obtains today's behavior, which it already has.
 - **Shadow evaluation:** an absent `auditTier` means no shadow evaluation and no shadow events. When present it changes no outcome by construction (§7.2.1), so it is compatible by definition. It is also the supported way to de-risk the two exceptions above: shadow the stricter tier, read what it would have denied, then adopt it.
 - **Violation actions:** an absent `onViolation` resolves to `deny` in every module, which is each module's existing hard-coded behavior. No workload changes. The one visible change is §8.1.4: denials now produce audit events even at `audit: none`. That adds events to the audit stream where there were none — a new output, not a new denial — and no sandbox behaves differently because of it.
@@ -463,7 +590,7 @@ Each phase is independently valuable and shippable.
 | Phase | Scope |
 | --- | --- |
 | **0** | This proposal set reviewed in a tracking issue; open questions triaged into decisions. |
-| **1** | `SandboxPolicy` API model; legacy-field normalization; `policy.network` end-to-end; conflict detection; effective-policy versioning and snapshots (§4.1); the violation response model and its always-on violation events (§8.1); the capability set, `GET /capabilities`, `policy.enforcement`, and inert-field reporting (§8.2); SDK `policy=`. |
+| **1** | `SandboxPolicy` API model; legacy-field normalization; `policy.network` end-to-end; conflict detection; effective-policy versioning and snapshots (§4.1); the violation response model and its always-on violation events (§8.1); the capability set, `GET /capabilities`, `policy.enforcement`, and inert-field reporting (§8.2); concurrency control and `status` (§4.2, §4.3); the principal and authority matrix (§5.2); the machine-readable schema and conformance suite (§11.16); SDK `policy=`. |
 | **2** | Resource: quota merge, windowed limits (`minute`–`month` + `lifetime`), `onExceeded` actions (`warn`/`pause`/`hold`/`kill`), notifications and webhook, hold approval API, usage exposure. |
 | **3** | Filesystem: baseline sensitive-path protection, `readOnlyPaths` / `denyPaths` / `writableRoots`, host-mount policy surface. |
 | **4** | Exec: modes, user restriction, timeout ceiling, concurrency, audit, typed denials. |
@@ -482,7 +609,7 @@ One ordering tension is worth naming rather than discovering during rollout: sha
 4. **Tier extensibility.** The graded-levels question formerly open here is settled by §7.1. What remains: may a deployment define additional named tiers, or is the three-value set closed? A deployment-defined tier would need its own versioning and announcement story (§7.1.6), and now also its own published expansion version (§7.1.7). A concrete candidate is a tier stricter than `restricted` that *does* require an `exec` allowlist and named `filesystem.writableRoots` — the values §7.1 refuses to guess. Such a tier is only coherent if it is legitimate for a tier to be unusable without accompanying fields, which is the question to answer first. §7.2 removes the second obstacle it faced: an operator can now shadow such a tier before adopting it, so the objection "nobody can tell whether it would break them" no longer stands on its own.
 5. **Snapshot interaction.** When a sandbox is cloned or restored from a snapshot, which parts of the effective policy and of the accumulated usage travel with it? Active grants included: dropping them is the safe answer, since inheriting a grant whose originating task no longer exists is a silent widening.
 6. **Grant authority.** Which principals may issue grants — sandbox owner, namespace operator, both? Should the maximum TTL vary by tier (shorter under `restricted`), and should some fields be permanently non-grantable regardless of the ceiling?
-7. **`grant` vs `allowance`.** §5.1 introduces a policy-level `grant`, while [resource.md](./resource.md) §7.3 already uses `grant` for a usage-counter allowance. Should the resource field be renamed to `allowance` before either ships, rather than leaving one word meaning two things?
+7. **Aggregate and per-window resource governance.** Two gaps remain in [resource.md](./resource.md) after the naming collision was resolved by renaming its field to `allowance`: whether `onExceeded` should be settable per window rather than per dimension (§13.7 there), and whether fixed windows need burst smoothing at their boundaries. Both are refinements of a working model rather than blockers.
 8. **Task-scoped policy.** Requirements ask for per-agent and per-task policy, but the smallest scope defined here is the sandbox. Is a task a first-class scope with its own effective policy and audit identity, or is per-task authorization exactly what §5.1 grants already provide? If the former, what identifies a task across the control plane?
 9. **Reachability vs consumption.** Egress port/protocol rules live in `network`, bandwidth lives in `resource.quota`. Is that seam (what may be reached vs how much may be consumed) the right one, or should a user be able to state "443 to this CIDR, at most 10 Mbit/s" in one place?
 10. **Composing profiles.** A sandbox references at most one profile (§4). A cloud security group is composable — an instance carries several, and the effective rule set is their combination — which is how "base lockdown" and "may reach GitHub" stay separate, reusable objects instead of being copied into every profile that needs both. Should a sandbox reference several profiles? The merge rule would have to be stated carefully, because profiles are *peers* with no precedence between them: allow-type lists would union, deny-type lists would union and every one of them would be binding (§4.6 of [network.md](./network.md)), modes and scalars would take the most restrictive value, and the intersection fields (`allowedCapabilities`, `syscall.allowedSyscalls`, `baselineExceptions`) would intersect. Note this is deliberately *not* the security-group rule, which unions allows and has no denies at all; unioning allows across peers here would let a permissive profile widen a strict one, which §5 forbids.
@@ -490,6 +617,10 @@ One ordering tension is worth naming rather than discovering during rollout: sha
 12. **Simulating a candidate policy.** §7.2 shadows a *tier*, deliberately, because a tier is one value with a published expansion. It does not answer "what would this policy I am about to write do?" — the question a security group's `DryRun` and a reachability analyzer answer. With five modules, tier expansion, provenance, binding denies, shadowing warnings, and grants all composing, an author cannot currently predict the effective result except by creating a sandbox. Should there be a read-only `POST /policies:simulate` returning the fully expanded effective policy, and a `POST /sandboxes/{id}/policy:explain` returning the verdict, matched rule, and contributing source for a hypothetical operation? Both are read-only and change no semantics, which makes this a question of scope rather than of risk.
 13. **Escalation on repeated violation.** §8.1 gives each violation an independent verdict: the hundredth attempt to read `~/.aws/credentials` is answered exactly like the first. Repetition is one of the strongest signals available — a legitimate workload does not retry a credential path in a loop — and nothing in the policy object can currently express "after N of these, stop being polite". A field would be shaped roughly as `onRepeatedViolation: {count, withinSec, action}`. Two objections keep it out of v1. A threshold is a value nobody can choose correctly in advance, which is the same trap §7.1 refuses to walk into for `writableRoots` and every `resource` budget; and "this pattern of behaviour is an attack" is a verdict produced by observing behaviour over time, which §2.3.1 places outside every module in this proposal. The consistent position is therefore that the audit stream carries the repetitions and a detection subsystem escalates by updating the policy — versioned and snapshotted like any other change. What has to be decided is whether that indirection is acceptable, or whether repeated-violation escalation is the one behavioural judgement cheap enough and unambiguous enough to belong in the policy object after all.
 14. **Co-located sandboxes with different network needs.** §12.1 makes one container the sandbox unit on the container substrate, and [network.md](./network.md) §4.9 requires co-located sandboxes to resolve to identical network policy because they share a network namespace. Together those rules forbid the most common real deployment shape: a workload container that should reach almost nothing, beside a mesh or telemetry sidecar that must reach a control plane. Four ways out exist and none is obviously right. Exempt declared infrastructure containers from the identical-policy rule, which requires the platform to decide what counts as infrastructure. Make the effective namespace policy the union of the co-located policies, which widens the workload's boundary and contradicts §5. Move the sidecar out of the Pod, which is not always possible. Or make the sandbox unit the Pod after all and accept an expansion step for the per-container fields. This question blocks the container substrate for any deployment that uses sidecars, so it cannot stay open past phase 1.
+15. **Normative dependencies are not yet self-contained — release blocker.** [network.md](./network.md) §1 incorporates the existing egress grammar, the L7 rule grammar, the DNS-learning behaviour, and the current ingress semantics *by reference*, through repository-relative paths that resolve outside this repository. A third party reading only this repository therefore cannot implement domain entries, DNS learning, or the L7 rule surface — the reference names them but does not define them. This is not a design question, it is a packaging defect, and it MUST be closed before the document set is offered as an implementable specification. Two acceptable resolutions: publish the referenced material as a versioned bundle inside this repository, or promote each reference to an immutable public URL recorded with its version and SHA-256. Whichever is chosen, anything incorporated by reference MUST participate in conformance (§11.16) on the same terms as the text here — a dependency outside the test suite is a dependency nobody has verified.
+16. **Machine-readable schema and a conformance suite — release blocker.** This document set is roughly 2,500 lines of prose describing merge order, provenance, tier expansion, grant ceilings, capability states, warnings, and error payloads. Acceptance criteria are scattered across the module specs, and nothing prevents two correct-looking implementations from resolving the same YAML into different effective policies. Required before adoption: a `SandboxPolicy` JSON Schema, canonical-serialization rules (which §4.3.3 already depends on for the policy hash), a field deprecation policy, and an adapter-independent conformance suite whose fixtures take `{sources, capability set, clock}` as input and `{effective policy, decision, audit events}` as output. The suite MUST cover at minimum: source merge, binding denies, grant issuance and expiry, `unsupported` fields under both `enforcement` values, tier expansion pinning, snapshot and restore (§8.3), and the concurrent-update cases in §4.2.
+17. **Break-glass access.** §5.2 defines who may do what, and deliberately omits how an operator bypasses it during an incident. Every deployment will need such a path, and an unspecified one tends to become an unlogged one. What has to be decided: whether break-glass is a distinct principal with its own audit class, whether it requires two-party authorization, whether it is time-bounded like a grant (§5.1), and whether a sandbox that was touched by it is marked as such for the rest of its life.
+18. **Ingress and image are under-specified relative to their blast radius.** Two surfaces are named here rather than left implicit, because both are load-bearing and neither is adequately covered. **Ingress:** `ingress.allowPublicTraffic` and `maskRequestHost` ([network.md](./network.md) §2) cannot express port, protocol, source constraint, authentication mode, token binding, expiry, or revocation — yet a public URL is a capability grant, not a network attribute. **Image:** every rule in `process`, `filesystem`, and `identity` executes inside an image this object says nothing about; a mutable tag or an unsigned registry undoes runtime enforcement without violating a single policy field. Minimum semantics for each, if they become modules: for ingress, protocol/port, source constraint, auth mode, identity binding, expiry, revocation, and a `public` flag that is never the default; for image, an immutable digest, allowed registries, signature or attestation status, and the startup UID the `process` rules will apply to.
 
 ## 12. Runtime substrates and non-normative notes
 

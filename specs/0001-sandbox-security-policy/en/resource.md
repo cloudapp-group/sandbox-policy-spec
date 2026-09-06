@@ -195,16 +195,16 @@ The distinction worth keeping straight: a shadow finding elsewhere in the propos
      "dimension":  "llmTokens.total",  // optional; omit to decide all current holds
      "window":     "month",            // optional; omitted with dimension → all holds of that dimension
      "decision":   "approve" | "deny",
-     "grant":      1000000,            // approve only, optional: extra allowance for the current window period
+     "allowance":  1000000,            // approve only, optional: extra headroom for the current window period
      "raiseLimit": 60000000            // approve only, optional: persistent limit raise for this sandbox
    }
    ```
 
-   - `approve` resumes the sandbox. `grant` adds to the current window period's allowance only (reverts at rollover); `raiseLimit` updates the sandbox's effective limit persistently.
-   - For a `lifetime` window a grant never reverts (lifetime has no rollover): it is a permanent addition for the sandbox's remaining existence.
+   - `approve` resumes the sandbox. `allowance` adds to the current window period's allowance only (reverts at rollover); `raiseLimit` updates the sandbox's effective limit persistently.
+   - For a `lifetime` window an allowance never reverts (lifetime has no rollover): it is a permanent addition for the sandbox's remaining existence.
    - `deny` terminates the sandbox.
 4. Authorization: approvals MUST be performed through the control-plane API by an authenticated principal authorized to manage the sandbox (owner/operator). The approval API MUST NOT be callable from within the sandbox or with sandbox-scoped credentials — untrusted agent code must not be able to approve its own hold.
-5. Every approval MUST be audited: approver identity, target, decision, and any grant/raise.
+5. Every approval MUST be audited: approver identity, target, decision, and any allowance/raise.
 6. Held sandboxes remain subject to the standard idle-timeout lifecycle (kill/pause on idle), so abandoned holds are eventually reclaimed.
 
 ## 8. Notifications
@@ -266,7 +266,7 @@ Per [overview.md](./overview.md) §5.1.8 every module declares its grantable sur
 
 Temporary additional consumption is already a first-class operation here, and it has a different shape from a grant: the approval API (§7.3) is driven by a **hold**, so a human decides at the moment the sandbox actually needs more, with the exceeded counters in front of them. A grant is a pre-authorization issued before the need is demonstrated. Adding grants to this module would give the same outcome two mechanisms, one of which discards the information the other is built on.
 
-> **Terminology.** The `grant` field of the approval API (§7.3) predates the time-bounded grants of [overview.md](./overview.md) §5.1 and is a different thing: an allowance added to a window counter, with no TTL of its own — it reverts at window rollover, or never, for `lifetime`. The collision is real and is recorded as an open question ([overview.md](./overview.md) §11.7).
+> **Terminology.** The `allowance` field of the approval API (§7.3) is deliberately *not* called a grant. It adds headroom to a window counter and has no TTL of its own — it reverts at window rollover, or never, for `lifetime` — which makes it a different mechanism from the time-bounded grants of [overview.md](./overview.md) §5.1. Both were briefly named `grant`; this field was renamed rather than leave one word meaning two things in one object.
 
 ## 11. Errors
 
@@ -275,13 +275,13 @@ Temporary additional consumption is already a first-class operation here, and it
 | `INVALID_POLICY` | 400 | `{field, reason}` | Non-positive limit, invalid window key, threshold outside (0, 1]. |
 | `POLICY_RESOURCE_EXHAUSTED` | terminal state / event | `{dimension, window, used, limit, action}` | Exceedance with action `kill` (or an approval `deny`). |
 | `POLICY_RESOURCE_HELD` | sandbox state / event | `{dimension, window, used, limit}` | Sandbox held pending approval. |
-| approval errors | 400 / 409 | `{reason}` | Approval targets no current hold, or invalid grant/raise. |
+| approval errors | 400 / 409 | `{reason}` | Approval targets no current hold, or invalid allowance/raise. |
 
 ## 12. Acceptance criteria
 
 1. Multi-window enforcement: with `llmTokens.total` limited per `minute` (action `pause`) and per `month` (action `hold`), a burst over the minute limit pauses the sandbox, which becomes resumable (and auto-resumes) at minute rollover; crossing the month limit holds it for approval.
 2. Rollover re-arms: after the minute window resets, consumption up to the new limit proceeds without events until a new threshold/exceedance transition.
-3. Hold requires a human: a held sandbox does not resume at window rollover; `approve` (with or without grant/raise) resumes it; `deny` terminates it; a grant of N allows at most N further units in the current period.
+3. Hold requires a human: a held sandbox does not resume at window rollover; `approve` (with or without allowance/raise) resumes it; `deny` terminates it; an allowance of N permits at most N further units in the current period.
 4. The approval API rejects calls authenticated with sandbox-scoped credentials.
 5. Threshold notifications fire at most once per threshold per window period; exceedance and hold events fire on every transition.
 6. Lifetime counters are monotonic and reported even without a lifetime limit.
@@ -304,7 +304,7 @@ Temporary additional consumption is already a first-class operation here, and it
 3. **Auto-resume.** Should `pause` auto-resume at rollover (proposed SHOULD) or require an explicit resume?
 4. **Webhook authentication.** HMAC signature scheme? Where are shared secrets stored?
 5. **Approval RBAC.** Which principals may approve: sandbox owner only, namespace operators, or anyone with cluster admin?
-6. **Grant visibility.** Should grants appear in `resource.usage` (e.g. an `allowance` field) so platforms can bill for approved overage? Note the naming collision with the time-bounded grants of [overview.md](./overview.md) §5.1, tracked as §11.7 there — whichever name survives, this field and that mechanism must not share it.
+6. **Allowance visibility.** Should approved allowances appear in `resource.usage`, so platforms can bill for approved overage and an operator can see how much of the current window is headroom rather than budget? The naming collision that used to sit here is resolved: this field is `allowance`, and `grant` means only the time-bounded policy relaxation of [overview.md](./overview.md) §5.1.
 7. **Per-window actions.** Should `onExceeded` be settable per window rather than per dimension (e.g. `minute`→`pause`, `month`→`hold` on the same dimension)?
 8. **Counter inheritance on restore/clone.** Reset is proposed here; should inheritance be available as an operator choice?
 9. **Estimation method.** §5.3 fixes the *properties* of an estimate (lower bound, derived from observed content) but not the algorithm. Should the algorithm and its expected error be published, so tenants can audit the estimated portion of their usage?

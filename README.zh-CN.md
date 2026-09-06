@@ -5,7 +5,7 @@
 
 本仓库包含 **提案 0001：Sandbox Security Policy** —— 一个面向沙箱执行环境的声明式、可复用、默认安全的策略框架。
 
-沙箱不仅仅是网络端点。它运行的是部分可信、由 Agent 生成的代码，因此其能力边界必须在一个统一的对象中覆盖 **网络、文件系统、执行、进程行为和资源** 消耗。
+沙箱不仅仅是网络端点。它运行的是部分可信、由 Agent 生成的代码，因此其能力边界必须在一个统一的对象中覆盖 **网络、文件系统、执行、进程行为、身份和资源** 消耗。
 
 ---
 
@@ -19,9 +19,10 @@
 | **Filesystem** | 宿主机挂载边界与沙箱内路径访问策略（`denyPaths`、`readOnlyPaths`、`writableRoots`） |
 | **Exec** | 命令白名单/黑名单、用户限制、超时上限、并发限制、审计 |
 | **Process** | 已运行进程的提权、持久化与系统调用策略 |
+| **Identity** | 工作负载身份、秘密暴露模式、目的地绑定的凭据注入、TTL 与吊销 |
 | **Resource** | CPU/内存配额、带宽上限、窗口化限制（分钟–月 + 生命周期）、LLM Token 计量、超限处置 |
 
-规范以六文档集合的形式组织在 `specs/0001-sandbox-security-policy/` 目录下。
+规范以七文档集合的形式组织在 `specs/0001-sandbox-security-policy/` 目录下，JSON Schema 位于 `schema/`，合规性 fixtures 位于 `fixtures/`。
 
 ---
 
@@ -39,12 +40,12 @@
 | ECS 实例 | 沙箱 |
 | --- | --- |
 | 运行人工编写、可信的工作负载 | 运行 Agent 生成、部分可信的代码 |
-| 边界 = 网络可达性 | 边界 = 网络 **+ 文件系统 + 执行 + 进程 + 资源** |
+| 边界 = 网络可达性 | 边界 = 网络 **+ 文件系统 + 执行 + 进程 + 身份 + 资源** |
 | 爆炸半径：数据外泄 | 爆炸半径：外泄 **+ 凭据窃取、宿主机挂载滥用、提权、失控循环、Token 浪费** |
 
 ### 当前的缺口
 
-五个能力域目前的成熟度差异很大：
+六个能力域目前的成熟度差异很大：
 
 | 模块 | 当前已有能力 | 缺口 |
 | --- | --- | --- |
@@ -52,9 +53,10 @@
 | **Filesystem** | 宿主机挂载前缀白名单与每个挂载的 `readOnly` | 缺少对沙箱内敏感路径的保护；缺少路径级只读/拒绝策略 |
 | **Exec** | 每次请求单独设置 `timeout`、`user`、`cwd` | 缺少沙箱级命令策略、用户限制、并发上限和审计 |
 | **Process** | 无任何面向用户的能力 | 提权、持久化与系统调用暴露面完全没有策略表达 |
+| **Identity** | 无 | 凭据以环境变量或文件抵达，沙箱内任何代码都能读到；没有工作负载身份、暴露模式、TTL 或吊销 |
 | **Resource** | CPU/内存稳态配额；空闲超时 | 缺少窗口化限制、生命周期预算、带宽上限、LLM Token 计量和超限处置 |
 
-如果没有单一策略对象，每个模块都会长出各自的配置风格、合并规则、默认值和审计格式。用户必须同时理解五个半成品系统；模板作者无法在一个地方表达"该模板的沙箱已被锁定"；未来的新模块还会引入第六、第七种方言。
+如果没有单一策略对象，每个模块都会长出各自的配置风格、合并规则、默认值和审计格式。用户必须同时理解六个半成品系统；模板作者无法在一个地方表达"该模板的沙箱已被锁定"；未来的新模块还会引入第七、第八种方言。
 
 ### 为什么需要统一策略？
 
@@ -80,6 +82,8 @@
 
 ```
 .
+├── schema/0001/             # SandboxPolicy 的 JSON Schema
+├── fixtures/                # 与适配器无关的合规性 fixtures
 └── specs/0001-sandbox-security-policy/
     ├── en/
     │   ├── overview.md      # Shared model, merge semantics, principles, tiers, shadow evaluation, grants, compatibility
@@ -87,6 +91,7 @@
     │   ├── filesystem.md    # Filesystem sub-policy
     │   ├── exec.md          # Command execution sub-policy
     │   ├── process.md       # Privilege, persistence, and system-call sub-policy
+    │   ├── identity.md      # Workload identity, secret exposure, credential scope
     │   └── resource.md      # Resource limits, governance, and LLM token accounting
     └── zh/
         ├── overview.md      # 共享模型、合并语义、原则、分级、影子评估、限时授权、兼容性
@@ -94,6 +99,7 @@
         ├── filesystem.md    # 文件系统子策略
         ├── exec.md          # 命令执行子策略
         ├── process.md       # 提权、持久化与系统调用子策略
+        ├── identity.md      # 工作负载身份、秘密暴露、凭据作用域
         └── resource.md      # 资源限制、治理与 LLM Token 计量
 ```
 

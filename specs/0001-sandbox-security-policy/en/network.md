@@ -13,7 +13,9 @@ This spec defines the network sub-policy of the `SandboxPolicy` object:
 
 Evaluation is **stateful**: rules describe connections, and the reply direction of an admitted connection needs no rule of its own (§4.7). This is the same contract a cloud security group offers, and it is what separates a reviewable rule set from one padded with reverse entries over the ephemeral port range.
 
-This spec **does not redefine** the existing egress grammar. The target syntax for `allowOut` / `denyOut`, the L7 rule grammar for `rules`, the DNS allow-listing and learning behavior, and the built-in private-CIDR denies are already specified by [Egress Network Policy](../../../guide/network-policy.md) and [Security Proxy](../../../guide/security-proxy.md). Those documents are incorporated by reference; this spec wraps them in the unified policy object and defines the merge, default, and compatibility contract.
+This spec **does not redefine** the existing egress grammar. The target syntax for `allowOut` / `denyOut`, the L7 rule grammar for `rules`, the DNS allow-listing and learning behavior, and the built-in private-CIDR denies are specified elsewhere; this spec wraps them in the unified policy object and defines the merge, default, and compatibility contract.
+
+> **Unresolved dependency — release blocker.** The documents those semantics live in ([Egress Network Policy](../../../guide/network-policy.md), [Security Proxy](../../../guide/security-proxy.md), [Restrict Public Access](../../../guide/restrict-public-access.md)) are **not part of this repository**, and the paths above resolve outside it. A reader with only this repository therefore cannot implement domain entries, DNS learning, the L7 rule grammar, or the current ingress token semantics: this document names them without defining them, which is not the same as incorporating them by reference. Until that is fixed, treat those four surfaces as specified-by-name-only. The resolution — a versioned bundle in-repository, or immutable URLs recorded with version and SHA-256, either way inside the conformance suite — is tracked as [overview.md](./overview.md) §11.15.
 
 ## 2. Object model
 
@@ -164,8 +166,10 @@ Per [overview.md](./overview.md) §5.1.8, a time-bounded grant against this modu
 
 Absence of `policy.network` resolves to the server-side default, which is the `baseline` tier ([overview.md](./overview.md) §7.1):
 
+A request that carries no `policy` object at all resolves to `tier: compatibility` ([overview.md](./overview.md) §7), which is byte-for-byte today's behavior:
+
 ```yaml
-network:
+network:                 # tier: compatibility — legacy path only
   allowInternetAccess: true
   allowOut: []
   denyOut: []            # plus built-in private-CIDR denies
@@ -177,7 +181,7 @@ network:
     allowPublicTraffic: true
 ```
 
-This is byte-for-byte today's behavior for requests that carry no network fields.
+A `policy` object that omits `tier` resolves to `restricted`, and this module's share of that is deny-all egress with no public ingress. **`compatibility` is the only tier that leaves `ingress.allowPublicTraffic` on**, and it is the only one that can claim a compatibility justification for doing so: a default-reachable sandbox is an availability default rather than a security one ([overview.md](./overview.md) §7.1). `tier: baseline` sits between the two — internet egress on, public ingress off — for the common case of a workload that must fetch dependencies but should never be dialled into.
 
 Under `tier: restricted` the same fields resolve to a deny-all posture instead — `allowInternetAccess: false` and `ingress.allowPublicTraffic: false` — so that "no inbound or outbound access unless named" is one field on the policy rather than two per module. The tier only changes these defaults; every evaluation rule in §4 is unchanged, and an explicit field in the same source still wins ([overview.md](./overview.md) §7.1 rule 3). `onViolation` stays `deny` under `restricted`, per [overview.md](./overview.md) §8.1.7 — and emphatically so here, since a tier that paired deny-all egress with `kill` would terminate a sandbox on its first unnamed destination, which is a very long way from what "give me a locked-down sandbox" asks for.
 
@@ -248,13 +252,15 @@ Template merge applies unchanged: a template's network configuration becomes the
 
 ## 10. Open questions
 
-1. Should `ingress` grow beyond the public-traffic gate (e.g. source CIDR allowlist, per-port ingress rules), or stay minimal in v1? Note that egress now has port and protocol scoping (§2.1) while ingress does not, which makes the asymmetry more visible than it was.
+1. **`ingress` is under-specified relative to its blast radius.** `allowPublicTraffic` and `maskRequestHost` (§2) cannot express port, protocol, source constraint, authentication mode, token binding, expiry, or revocation — yet exposing a sandbox to the public internet is a capability grant, not a network attribute, and it is the single field in this module most likely to be the cause of an incident. Egress now has port and protocol scoping (§2.1) while ingress has neither, which makes the asymmetry hard to defend. Whether this becomes an `endpoint` module or a widened `ingress` object, the minimum semantics are the same and are recorded in [overview.md](./overview.md) §11.18. What v1 does settle: public ingress is off under every tier except `compatibility` (§6).
 2. Domain `denyOut`: rejected today by design. Should a DNS-sinkhole-style deny (block resolution of named domains) be specified later?
 3. IPv6/AAAA support in allow/deny and learning — out of scope for v1; confirm.
 4. **Denying by port.** §2.1 adds port scoping to the *allow* surface only. Should there be a port-scoped `denyOut` as well, or is "name what may be reached" sufficient given that a deny-all posture is one tier away?
 5. **Rate and reachability.** Bandwidth is a `resource.quota` dimension while reachability is here ([overview.md](./overview.md) §11.9). Should a `PortRule` be able to carry its own rate ceiling, or does that recreate the dialect problem the unified object exists to prevent?
 6. **Flow timeouts as policy.** §4.7 requires a documented idle timeout for connectionless flows but leaves the value to the platform. Should it be a policy field? A workload holding thousands of idle UDP flows is a resource question, which argues for leaving it out of `network` entirely — but the *reachability* consequence of an expiring flow lands here.
 7. **Identity-based targets.** Every target in this spec is an address or resolves to one. Peer-group references (the security-group model) and label selectors (the NetworkPolicy model) express "these workloads may talk to each other" without anyone writing a CIDR, which is what the multi-agent case needs. Tracked as [overview.md](./overview.md) §11.11, because the blocking obstacle is that sandbox-to-sandbox traffic rides on the ranges §4.2 denies unconditionally.
+
+   Two decisions are taken now, so that v1 does not push users toward a worse workaround while the question stays open. The field names `peerSelector` and `sandboxGroupRef` are **reserved**: a policy using either MUST be rejected with `400 POLICY_UNSUPPORTED` naming the field, and the capability set MUST declare them `unsupported` ([overview.md](./overview.md) §8.2) rather than omit them. Reserving-and-rejecting is better than silence, because silence is what makes a user reach for the alternative — hand-writing a private CIDR into `allowOut` in the hope that it opens sandbox-to-sandbox traffic. That never works (§4.2 denies those ranges unconditionally and no policy may lift them), but a user who tries it and gets a generic failure learns nothing, whereas a user who writes `peerSelector` and is told the field is not yet supported learns exactly where the gap is.
 
 ## 11. Non-normative notes
 

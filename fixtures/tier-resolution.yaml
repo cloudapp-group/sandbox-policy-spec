@@ -1,0 +1,117 @@
+name: tier-absent-policy-resolves-compatibility
+spec: overview.md §7, §9
+description: >
+  A request with no policy object at all travels the legacy path and resolves to
+  tier: compatibility — byte-for-byte today's behaviour, including public ingress.
+  This is the fixture that proves the default change did not break the existing API.
+given:
+  sources:
+    template: null
+    profile: null
+    request: null          # no `policy` key present at all
+  capabilities:
+    version: cap/1
+    default: enforced
+  clock: "2026-09-06T00:00:00Z"
+expect:
+  effectivePolicy:
+    tier: compatibility
+    network:
+      allowInternetAccess: true
+      ingress:
+        allowPublicTraffic: true
+    process:
+      mode: baseline
+      noNewPrivileges: false
+      runAsNonRoot: false
+      allowDaemonize: true
+    identity:
+      mode: unrestricted
+  notes:
+    - Filesystem baseline/1 and process syscall/1 still apply. They are the two
+      documented exceptions to zero-behaviour-change for legacy callers (§9).
+---
+name: tier-empty-policy-resolves-restricted
+spec: overview.md §7
+description: >
+  A policy object that is present but omits `tier` resolves to restricted, not to
+  compatibility. This is the breaking change from the previous revision and the
+  reason §7 separates "absent policy" from "absent tier".
+given:
+  sources:
+    template: null
+    profile: null
+    request:
+      policy: {}           # present, empty
+  capabilities:
+    version: cap/1
+    default: enforced
+  clock: "2026-09-06T00:00:00Z"
+expect:
+  effectivePolicy:
+    tier: restricted
+    network:
+      allowInternetAccess: false
+      ingress:
+        allowPublicTraffic: false
+    process:
+      mode: baseline
+      noNewPrivileges: true
+      runAsNonRoot: true
+      allowDaemonize: false
+      audit: metadata
+    identity:
+      mode: managed
+      defaultExposure: proxy
+    resource:
+      onExceeded: hold
+---
+name: tier-baseline-drops-public-ingress
+spec: overview.md §7.1
+description: >
+  baseline is the middle ground: egress on, public ingress off. It exists for
+  workloads that must fetch dependencies but should never be reachable. This
+  fixture pins the one field that distinguishes it from compatibility.
+given:
+  sources:
+    request:
+      policy:
+        tier: baseline
+  capabilities:
+    version: cap/1
+    default: enforced
+  clock: "2026-09-06T00:00:00Z"
+expect:
+  effectivePolicy:
+    tier: baseline
+    network:
+      allowInternetAccess: true
+      ingress:
+        allowPublicTraffic: false
+---
+name: tier-merge-most-restrictive-wins
+spec: overview.md §5, §7.1
+description: >
+  Tier ordering is restricted > baseline > compatibility > unrestricted. A request
+  cannot loosen a template's tier, and compatibility sits below baseline because it
+  is the only tier that leaves public ingress on.
+given:
+  sources:
+    template:
+      policy:
+        tier: restricted
+    profile: null
+    request:
+      policy:
+        tier: compatibility     # attempts to loosen
+  capabilities:
+    version: cap/1
+    default: enforced
+  clock: "2026-09-06T00:00:00Z"
+expect:
+  effectivePolicy:
+    tier: restricted
+  policyWarnings:
+    - field: policy.tier
+      reason: shadowed_by_more_restrictive_source
+      source: template
