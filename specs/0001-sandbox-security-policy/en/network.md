@@ -123,6 +123,18 @@ The granularity in the second row is the point of this section, and it is a limi
 4. There is no `warn`, on the terms of [overview.md](./overview.md) §8.1.2. `auditTier` (§6.1) is how a deployment learns which destinations a stricter posture would reject, while keeping the current rules enforced.
 5. Either action emits a violation event, at every audit level (§7).
 
+### 4.9 Enforcement scope
+
+Every other module in this proposal enforces at the sandbox unit. This one does not always, and the difference is a property of the substrate rather than a choice:
+
+1. This policy is enforced on the **network namespace** the sandbox occupies. On the VM substrate that namespace belongs to exactly one sandbox, and scope and sandbox coincide.
+2. On the container substrate a sandbox is one container ([overview.md](./overview.md) §12.1), and co-located containers **share** a namespace. The enforcement scope is therefore wider than the sandbox.
+3. Where two or more sandboxes share a namespace, their `policy.network` MUST resolve to an identical effective configuration. A create request that would place a sandbox into a namespace whose existing effective network policy differs MUST be rejected with `400 POLICY_NETWORK_SCOPE_CONFLICT`, carrying the conflicting fields and the sandbox that established the current configuration.
+4. The platform MUST NOT resolve such a conflict by taking the strictest value, the union, or the most recent. Each of those silently makes one sandbox's policy govern another's traffic, which is both a boundary this object does not describe and the least debuggable failure it could produce: an operator reading either sandbox's effective policy would see a document that does not match the packets.
+5. Rule 3 is a create-time check against *resolved* configurations, not a textual comparison. Two sandboxes that arrive at the same effective policy through different sources satisfy it.
+
+Rule 3 forbids the workload-plus-sidecar shape that most container deployments actually use, and this spec does not yet have an answer for it — see [overview.md](./overview.md) §11.14. Stating the conflict as a rejection is deliberate: it makes the gap visible at create time, on the substrate where it exists, instead of letting a mesh proxy quietly inherit a lockdown intended for the workload next to it, or the reverse.
+
 ## 5. Merge semantics
 
 On top of the shared rules in [overview.md](./overview.md) §5:
@@ -187,6 +199,8 @@ Two module-specific points:
 | `INVALID_POLICY` | 400 | `{field, reason}` | Malformed entry (e.g. domain in `denyOut`, invalid CIDR). |
 | `POLICY_NETWORK_LIMIT` | 400 | `{map, got, max}` | Final unique entry count exceeds a map limit. |
 | `POLICY_NETWORK_CONFLICT` | 400 | `{field, legacyField}` | A legacy field and `policy.network` are both present (§8). |
+| `POLICY_NETWORK_SCOPE_CONFLICT` | 400 | `{fields, establishedBy}` | A sandbox would join a shared network namespace whose effective policy differs (§4.9.3). |
+| `POLICY_UNSUPPORTED` | 400 | `{field, state, capabilityVersion}` | Under `enforcement: strict`, the policy names a field this deployment declares `unsupported` ([overview.md](./overview.md) §8.2.2). Domain entries in `allowOut` are the field most likely to be in that state — see §11. |
 
 Egress rejections at runtime are **not** API errors; they surface to the sandbox as connection failures (`ECONNREFUSED`-class TCP resets for rejected TCP, drops otherwise), exactly as today. Under `onViolation: kill` (§4.8) the sandbox is terminated instead, and the terminal state records the destination and the matched rule as the cause.
 
@@ -247,3 +261,5 @@ Template merge applies unchanged: a template's network configuration becomes the
 - The existing data path (eBPF L3/L4 enforcement plus an L7 proxy for flagged HTTP/HTTPS) already satisfies overview principle 5 for this module; no enforcement-point change is required by this spec. Connection tracking (§4.7) is likewise a property the existing path already has — §4.7 documents it as a contract rather than requesting it.
 - **Rejected alternative for §4.6:** evaluating `denyOut` before `allowOut` unconditionally (a global deny-first model). It is the more familiar security model, but it changes the meaning of every existing configuration that punches an allow hole in a broad deny, which contradicts the compatibility promise in §9.1 and §6. Binding denies achieve the same protection against privilege escalation across sources while keeping single-source semantics byte-for-byte unchanged.
 - **Rejected alternative — implicit isolation.** A Kubernetes NetworkPolicy flips its target to default-deny for a direction as soon as any policy selects it: writing one allow rule implicitly denies everything else. It is an attractive property, because it makes the common intent ("only these destinations") impossible to express incompletely. It is rejected here because in this object an `allowOut` entry is additive by definition and has been since before this proposal: adopting implicit isolation would silently convert every existing configuration that lists a few allow entries alongside general internet access into a deny-all sandbox, which is the exact opposite of §9.1. The explicit form is `allowInternetAccess: false`, and `tier: restricted` makes it one field — the same destination reached without reinterpreting anyone's existing policy.
+- **Implementation paths.** Address and CIDR entries, `portRules`, connection state (§4.7), and the L7 rule surface are commodity on both substrates ([overview.md](./overview.md) §12.2): packet filtering at L3/L4, conntrack, and a proxy in the egress path. **Domain entries are the exception.** They need name-resolution-time learning wired into the filter, which the VM substrate gets from its own DNS path, and which on the container substrate requires either a CNI that implements name-based policy or routing the traffic through the L7 proxy. A deployment with neither MUST declare domain entries `unsupported` rather than resolve the name once and pin the address — that is an IP policy wearing a domain policy's name, and §8.2.1 rule 4 forbids reporting it as enforcement. This is the single largest capability difference in the proposal, and it falls on the field users reach for first.
+- **On `kill` and attribution.** §4.8's sandbox-scoped `kill` is not a shortcoming of one substrate. Neither an eBPF program on a tap device nor a CNI datapath has reliable process context at the point a connection is rejected; both would have to guess. The scope follows from where the enforcement sits, which is why it is the same on both.

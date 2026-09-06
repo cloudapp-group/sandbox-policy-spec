@@ -274,5 +274,16 @@ Denials MUST NOT be distinguishable from ordinary permission failures in a way t
 
 ## 11. Non-normative notes
 
-- Each sandbox owns a whole kernel, so the requirements in §4.3 can be met by in-kernel, unprivileged, per-sandbox mechanisms (e.g. an LSM with per-process rule sets, or equivalent syscall-level enforcement). The spec intentionally mandates only the *properties*, not the mechanism. [process.md](./process.md) §4.5 states the same requirements for the syscall surface, and the two are expected to be satisfiable by one mechanism.
-- The host-boundary rules formalize existing behavior (prefix allowlist + read-only remount) without changing it.
+- Each sandbox owns a whole kernel on the VM substrate, so the requirements in §4.3 can be met by in-guest, unprivileged, per-process mechanisms (e.g. an LSM with per-process rule sets, or equivalent syscall-level enforcement). The spec intentionally mandates only the *properties*, not the mechanism. [process.md](./process.md) §4.5 states the same requirements for the syscall surface, and the two are expected to be satisfiable by one mechanism.
+- **This module is one of the two places where the substrates genuinely differ** ([overview.md](./overview.md) §12.2), and it is worth being concrete about the shape of the difference rather than leaving it as "depends on the platform":
+
+  | Path | How §4.2 is realized | Capability state to declare |
+  | --- | --- | --- |
+  | VM substrate, in-guest LSM with per-process rule sets | Directly: patterns become rule sets attached to each process | `enforced` |
+  | Container substrate, unprivileged per-process path rule set in the kernel | Directly, within the operations that interface covers | `enforced`, or `partial` where the interface does not cover an operation the module specifies |
+  | Container substrate, host-managed LSM profile generated per sandbox | Directly, but requires node-level cooperation the policy object cannot compel | `enforced` where the deployment controls its nodes |
+  | Neither available | — | `unsupported` |
+
+  The last row is the one that has to be handled honestly. A read-only bind mount is **not** an implementation of `denyPaths`: it changes writability, not visibility, so a credential file stays readable — which is the entire threat this module exists to answer ([overview.md](./overview.md) §2.3). Nor is it partial enforcement, since it does not narrow the specified rule, it substitutes a different one. §8.2.1 rule 4 requires such a deployment to declare the field `unsupported` and let `enforcement: strict` reject policies that name it.
+- The `writableRoots` direction is the more portable half of this module. Expressing "writes only under these roots" maps onto mount-level read-only defaults far more closely than `denyPaths` maps onto anything, so a deployment whose path-rule interface is absent may still find `mounts.defaultReadOnly` and `writableRoots` reach `enforced` while `denyPaths` and `readOnlyPaths` do not. Capability declarations are per field for exactly this reason.
+- The host-boundary rules formalize existing behavior (prefix allowlist + read-only remount) without changing it. They are also substrate-independent: `mounts.allowedHostPrefixes` is a create-time check on the mount request, so it needs no in-sandbox mechanism at all.

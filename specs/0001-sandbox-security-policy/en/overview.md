@@ -53,7 +53,7 @@ The five modules are at very different levels of maturity today:
 | Network | Egress allow/deny at L3/L4, domain allow-listing with DNS learning, L7 HTTP/HTTPS rules with audit and header injection, public-ingress gating. | Fields are scattered across the create request; ingress is a single switch; no reusable policy object; no unified merge semantics across modules. |
 | Filesystem | Host-mount prefix allowlist and per-mount `readOnly`. | No protection for sensitive paths *inside* the sandbox (`~/.ssh`, `~/.aws/credentials`, `/etc/shadow`); no path-level read-only/deny policy; the prefix allowlist is not part of the user-facing policy API. |
 | Exec | Per-request `timeout`, `user`, `cwd` on command execution. | No sandbox-level policy: no command allowlist/denylist, no user restriction, no concurrency cap, no wall-clock ceiling, no audit trail. |
-| Process | Nothing user-facing. Process and PID isolation between sandboxes is a property of the sandbox model (§12), not something a policy can state. | No policy surface at all: privilege gain, persistence, and system-call exposure cannot be constrained declaratively, even though the enforcement mechanisms already exist below the API — [filesystem.md](./filesystem.md) §11 already contemplates "equivalent syscall-level enforcement". |
+| Process | Nothing user-facing. Process and PID isolation between sandboxes is a property of the substrate (§12.3), not something a policy can state. | No policy surface at all: privilege gain, persistence, and system-call exposure cannot be constrained declaratively, even though the enforcement mechanisms already exist below the API — [filesystem.md](./filesystem.md) §11 already contemplates "equivalent syscall-level enforcement". |
 | Resource | Steady-state CPU/memory quotas; idle timeout with kill/pause. | No windowed limits (minute–month) or lifetime budgets; no bandwidth ceiling; no LLM token metering; no exceed actions, notifications, or human-approval flow. |
 
 ### 2.2 Why a unified object
@@ -133,6 +133,7 @@ policy:
   tier:        baseline | restricted | unrestricted   # default: baseline — see §7.1
   tierVersion: string    # e.g. "tier/1"; default: platform default — see §7.1.7
   auditTier:   baseline | restricted | unrestricted   # optional; shadow-only — see §7.2
+  enforcement: strict | bestEffort   # default: strict — see §8.2
   network: { ... }       # see network.md
   filesystem: { ... }    # see filesystem.md
   exec: { ... }          # see exec.md
@@ -185,6 +186,7 @@ When more than one policy source is present, the effective policy is computed on
 | Rule lists (`rules`, exec command rules) | Higher-precedence rules sort **before** lower-precedence rules; evaluation is first-match-wins. |
 | Mode fields (`exec.mode`, `filesystem.mode`, `process.mode`, `process.syscall.mode`) | The most restrictive mode wins. |
 | Violation actions (`onViolation`, `onExceeded`) | The most severe action wins (§8.1.7, [resource.md](./resource.md) §10). |
+| `enforcement` | `strict` wins. A lower-precedence `strict` MUST NOT be downgraded to `bestEffort` (§8.2.2 rule 2), and an attempt is rejected rather than shadowed. |
 | **Narrow-only restrictions** | A restriction contributed by a lower-precedence source MUST NOT be removable, overridable, or punched through by a higher-precedence source. Higher precedence may narrow the boundary; it may never widen it. Module specs name the fields this governs — network binding denies and `allowInternetAccess`, `exec.allowedUsers`, `filesystem.mounts.allowedHostPrefixes` and `filesystem.baselineExceptions`, `process.noNewPrivileges` and `process.allowedCapabilities`, `resource.limits`. The single, bounded exception is a time-bounded grant (§5.1). |
 
 Where a higher-precedence source asks for something the narrow-only rule forbids, the module spec MUST specify one of two outcomes and never a silent third: reject the request (`400`, for a direct contradiction such as flipping a boolean), or accept the request and report the ineffective part in a `policyWarnings` array on the response (for an entry that is merely shadowed).
@@ -230,7 +232,7 @@ DELETE /sandboxes/{id}/grants/{grantID}    revoke early
 2. **Absent ≠ unrestricted.** An absent sub-policy or field resolves to the server-side default, which is itself a documented, safe value.
 3. **Safe by default, explicit opt-out.** Baseline protections are on by default; opting out is a positive, visible act (e.g. `mode: unrestricted`), never a side effect of omission.
 4. **Denials are explainable.** Every denial carries the reason (matched rule, resource dimension, exceeded limit) in a structured form so that callers and agents can react programmatically.
-5. **Enforcement is mandatory, not advisory.** Every rule in the module specs is enforced at a point the sandbox workload cannot bypass. Where a rule cannot be enforced mandatorily, the spec says so explicitly instead of pretending.
+5. **Enforcement is mandatory, not advisory.** Every rule in the module specs is enforced at a point the sandbox workload cannot bypass. Where a rule cannot be enforced mandatorily, the spec says so explicitly instead of pretending. This principle has exactly one configurable exception — `policy.enforcement: bestEffort` (§8.2), for deployments whose runtime cannot enforce a field at all — and that exception is fenced, defaulted off, and visible in the effective policy for the same reasons a time-bounded grant is (§5.1).
 6. **One representation downstream.** Regardless of how a policy was expressed (legacy fields, inline policy, profile), the effective policy is computed once and exposed as one object.
 
 ## 7. Shared defaults
@@ -312,7 +314,7 @@ Shadow evaluation is deliberately **not** a general dry-run of an arbitrary poli
 
 ## 8. Shared error model
 
-- All policy errors use the `POLICY_` prefix: `POLICY_NETWORK_*`, `POLICY_FS_*`, `POLICY_EXEC_*`, `POLICY_PROCESS_*`, `POLICY_RESOURCE_*`, `POLICY_GRANT_*`.
+- All policy errors use the `POLICY_` prefix: `POLICY_NETWORK_*`, `POLICY_FS_*`, `POLICY_EXEC_*`, `POLICY_PROCESS_*`, `POLICY_RESOURCE_*`, `POLICY_GRANT_*`, `POLICY_UNSUPPORTED`.
 - Policy **configuration** errors (invalid, conflicting, over-limit) are reported at create/update time as HTTP `400` with code `INVALID_POLICY` and a machine-readable `field` pointer.
 - Policy **enforcement** errors are reported to the operation that was denied, as structured errors carrying the matched rule name or exhausted dimension. Exceptions: filesystem and process enforcement surface as standard OS error codes (`EACCES`/`EROFS`, `EPERM`) because they apply below the API layer.
 - Every module defines its error codes and their payloads in its spec.
@@ -383,6 +385,64 @@ Per the same rule as grantable fields (§5.1.8) and shadow support (§7.2.5), a 
 - `onViolation` merges as **most severe wins**: `kill` > `deny`, from any source. This is the existing rule for `syscall.onViolation` ([process.md](./process.md) §7), applied uniformly.
 - **No tier changes `onViolation`.** Both `baseline` and `restricted` resolve to `deny`. This is the §7.1 restraint applied honestly: `deny` versus `kill` is not a question of how strict a deployment wants to be, it is a question of whether a process that crossed the line should be allowed to keep running — and only the deployment knows whether its workload can survive that. Unlike `restricted`'s other expansions, the failure here is neither immediate nor legible: a killed process surfaces as a partial result or a hung task, far from the policy that caused it. `resource`'s `onExceeded: hold` is a tier default precisely because `hold` is safe and reversible; `kill` is neither.
 
+### 8.2 Enforcement capability
+
+Every requirement in this proposal fixes a *property* and leaves the mechanism open. That is what lets one specification target both a VM-per-sandbox runtime and a container runtime (§12.1). It also creates a problem the spec has to answer rather than assume away: **the two runtimes cannot enforce exactly the same set of fields.** Most of the object maps identically — seccomp filters, capability sets, `no_new_privs`, cgroup accounting, and connection tracking exist in both — but two surfaces differ materially, and are named in §12.2.
+
+A policy that names a field the deployment cannot enforce is the exact situation principle 2 was written against: absent must not mean unrestricted, and neither must *present but inert*.
+
+#### 8.2.1 Declared capability
+
+1. Every deployment MUST publish which policy fields it enforces. The published capability set is part of the platform's contract, not documentation.
+2. The capability set MUST be **versioned**, and the version in force MUST be recorded in the effective policy and every snapshot (§4.1). Six months later, "why did this sandbox not block that?" MUST be answerable from stored records — and without the capability version it is not.
+3. Each field is declared in one of three states, and the middle one is what makes the declaration useful:
+
+   | State | Meaning |
+   | --- | --- |
+   | `enforced` | The field is enforced with the full semantics its module specifies. |
+   | `partial` | The field is enforced, but with a documented narrower scope than the module specifies. The narrowing MUST be described, not merely flagged. |
+   | `unsupported` | The field has no enforcement whatsoever on this deployment. |
+4. `partial` MUST NOT be used to cover an approximation that changes what the field means. Realizing `denyPaths` as a read-only mount is not partial enforcement of a deny, it is a different rule with a similar name; realizing a domain allow-entry by resolving it once at create time and pinning the address is not partial enforcement of a domain policy, it is an IP policy. Either the field is enforced as specified, narrower but honestly described, or `unsupported`. An approximation reported as enforcement is the failure mode §8.1.2 rejects for `warn`, arriving through a different door.
+
+```
+GET /capabilities        the enforcement capability set and its version
+```
+
+#### 8.2.2 `policy.enforcement`
+
+```yaml
+policy:
+  enforcement: strict | bestEffort   # default: strict
+```
+
+| Value | A policy naming an `unsupported` field |
+| --- | --- |
+| `strict` (default) | Rejected with `400 POLICY_UNSUPPORTED`, carrying `{field, state, capabilityVersion}`. |
+| `bestEffort` | Accepted. The field is inert, and that fact is made visible per §8.2.3. |
+
+`bestEffort` exists because a single policy object is meant to be portable across runtimes, and under `strict` a policy written for a VM deployment is rejected outright by a container deployment that cannot enforce one of its fields. That is a real cost, and `bestEffort` is the escape from it.
+
+It is also, unavoidably, a switch that makes "is my policy actually enforced?" a configuration question. Principle 5 now names it as its one exception (§6). Because of that, it is fenced the same way a grant is:
+
+1. **Default off.** An absent `enforcement` resolves to `strict`. A deployment gets fail-closed behaviour without asking for it, and `bestEffort` is never reached by omission (principle 3).
+2. **Narrow-only.** `strict` wins in merge. A template or profile that set `strict` MUST NOT be downgraded to `bestEffort` by a higher-precedence source; such a request MUST be rejected with `400 POLICY_CONFLICT`. Without this rule, `bestEffort` is a privilege-escalation path: any caller could silently switch off every field an administrator's template relies on.
+3. **Never a hole in an unconditional deny.** `bestEffort` applies only to fields a deployment cannot enforce. It MUST NOT relax anything the spec denies unconditionally — the built-in private-CIDR denies ([network.md](./network.md) §4.2) among them — because those are not capability questions. A deployment that cannot enforce them cannot host sandboxes.
+4. **Visible in the resolved policy**, per §8.2.3. A `bestEffort` policy that reads like an enforced one is worse than a rejection.
+
+#### 8.2.3 What an inert field must look like
+
+Under `bestEffort`, for every field resolved to `unsupported` or `partial`:
+
+1. The effective policy exposed by the API MUST mark the field with its state and the capability version that determined it. A reader of the effective policy MUST be able to see which parts of it are real without consulting a separate document.
+2. The create/update response MUST carry a `policyWarnings` entry `{field, state, reason, capabilityVersion}`.
+3. Sandbox creation MUST emit an audit event naming every inert field. A `policyWarnings` entry is read once by whoever made the call; the gap persists for the sandbox's whole life, so it belongs in the audit stream too — the same reasoning that puts `baselineExceptions` there ([filesystem.md](./filesystem.md) §9.4).
+4. A `partial` field MUST report the narrowing, not just the state. "Enforced, but only at mount granularity" is actionable; "partial" alone is not.
+
+#### 8.2.4 Interaction with shadow evaluation and grants
+
+- **Shadow evaluation** (§7.2) of an `unsupported` field produces nothing, and MUST say so rather than reporting a clean result. A shadow report that is empty because nothing was evaluated is indistinguishable, to a reader, from one that is empty because nothing was violated — and those are opposite conclusions. The shadow report MUST therefore carry the same inert-field list as §8.2.3.
+- **Grants** (§5.1) against an `unsupported` field MUST be rejected with `400 POLICY_GRANT_INVALID`. Granting a temporary relaxation of a restriction that was never in force is a no-op that produces an audit trail implying otherwise, which is worse than the error.
+
 ## 9. Compatibility
 
 - **E2B parity:** the E2B-compatible surface (`allow_internet_access`, `network{}`) is untouched. Requests without `policy` behave exactly as today; internally they are normalized to the default policy, which becomes the single representation downstream (principle 6).
@@ -392,6 +452,7 @@ Per the same rule as grantable fields (§5.1.8) and shadow support (§7.2.5), a 
 - **Tier versions:** an absent `tierVersion` resolves to the platform default, recorded in the effective policy. Since a new tier version may only tighten (§7.1.7), pinning is how a deployment declines a future tightening — not how it obtains today's behavior, which it already has.
 - **Shadow evaluation:** an absent `auditTier` means no shadow evaluation and no shadow events. When present it changes no outcome by construction (§7.2.1), so it is compatible by definition. It is also the supported way to de-risk the two exceptions above: shadow the stricter tier, read what it would have denied, then adopt it.
 - **Violation actions:** an absent `onViolation` resolves to `deny` in every module, which is each module's existing hard-coded behavior. No workload changes. The one visible change is §8.1.4: denials now produce audit events even at `audit: none`. That adds events to the audit stream where there were none — a new output, not a new denial — and no sandbox behaves differently because of it.
+- **Enforcement capability:** an absent `enforcement` resolves to `strict`, so a deployment that publishes a capability set covering everything it ships sees no change. Where a deployment cannot enforce a field, `strict` turns what would have been a silent gap into a `400` at create time. That is a behaviour change for policies that named such a field, and it is the intended one: the alternative is the sandbox the caller believed was protected. Deployments that need the old permissiveness during migration set `bestEffort` explicitly and get the inert-field reporting of §8.2.3 with it.
 - **SDKs:** minor versions add a `policy=` parameter and typed policy errors; existing signatures are unchanged.
 - **Migration:** a mapping from every legacy field to its policy location is defined in [network.md](./network.md) §8.
 
@@ -402,7 +463,7 @@ Each phase is independently valuable and shippable.
 | Phase | Scope |
 | --- | --- |
 | **0** | This proposal set reviewed in a tracking issue; open questions triaged into decisions. |
-| **1** | `SandboxPolicy` API model; legacy-field normalization; `policy.network` end-to-end; conflict detection; effective-policy versioning and snapshots (§4.1); the violation response model and its always-on violation events (§8.1); SDK `policy=`. |
+| **1** | `SandboxPolicy` API model; legacy-field normalization; `policy.network` end-to-end; conflict detection; effective-policy versioning and snapshots (§4.1); the violation response model and its always-on violation events (§8.1); the capability set, `GET /capabilities`, `policy.enforcement`, and inert-field reporting (§8.2); SDK `policy=`. |
 | **2** | Resource: quota merge, windowed limits (`minute`–`month` + `lifetime`), `onExceeded` actions (`warn`/`pause`/`hold`/`kill`), notifications and webhook, hold approval API, usage exposure. |
 | **3** | Filesystem: baseline sensitive-path protection, `readOnlyPaths` / `denyPaths` / `writableRoots`, host-mount policy surface. |
 | **4** | Exec: modes, user restriction, timeout ceiling, concurrency, audit, typed denials. |
@@ -428,11 +489,50 @@ One ordering tension is worth naming rather than discovering during rollout: sha
 11. **Identity-based egress targets.** Every egress target is an address, a CIDR, or a name that resolves to one (§2.1 of [network.md](./network.md)). A security group can instead name *another security group* as the peer, and a Kubernetes NetworkPolicy can select pods by label — identity-based microsegmentation, which survives address reassignment and expresses "these workloads may talk to each other" without anyone writing a CIDR. The multi-agent case wants exactly this: two sandboxes cooperating on one task. Two obstacles have to be cleared first. There is no sandbox grouping concept to point at, and sandbox-to-sandbox traffic rides on the very ranges §4.2 of [network.md](./network.md) denies unconditionally with "user policy MUST NOT be able to allow these ranges" — so support would require a platform-resolved exception that users cannot hand-write, which is the one place in this proposal where an unconditional deny would gain a hole. Worth doing, not worth doing cheaply.
 12. **Simulating a candidate policy.** §7.2 shadows a *tier*, deliberately, because a tier is one value with a published expansion. It does not answer "what would this policy I am about to write do?" — the question a security group's `DryRun` and a reachability analyzer answer. With five modules, tier expansion, provenance, binding denies, shadowing warnings, and grants all composing, an author cannot currently predict the effective result except by creating a sandbox. Should there be a read-only `POST /policies:simulate` returning the fully expanded effective policy, and a `POST /sandboxes/{id}/policy:explain` returning the verdict, matched rule, and contributing source for a hypothetical operation? Both are read-only and change no semantics, which makes this a question of scope rather than of risk.
 13. **Escalation on repeated violation.** §8.1 gives each violation an independent verdict: the hundredth attempt to read `~/.aws/credentials` is answered exactly like the first. Repetition is one of the strongest signals available — a legitimate workload does not retry a credential path in a loop — and nothing in the policy object can currently express "after N of these, stop being polite". A field would be shaped roughly as `onRepeatedViolation: {count, withinSec, action}`. Two objections keep it out of v1. A threshold is a value nobody can choose correctly in advance, which is the same trap §7.1 refuses to walk into for `writableRoots` and every `resource` budget; and "this pattern of behaviour is an attack" is a verdict produced by observing behaviour over time, which §2.3.1 places outside every module in this proposal. The consistent position is therefore that the audit stream carries the repetitions and a detection subsystem escalates by updating the policy — versioned and snapshotted like any other change. What has to be decided is whether that indirection is acceptable, or whether repeated-violation escalation is the one behavioural judgement cheap enough and unambiguous enough to belong in the policy object after all.
+14. **Co-located sandboxes with different network needs.** §12.1 makes one container the sandbox unit on the container substrate, and [network.md](./network.md) §4.9 requires co-located sandboxes to resolve to identical network policy because they share a network namespace. Together those rules forbid the most common real deployment shape: a workload container that should reach almost nothing, beside a mesh or telemetry sidecar that must reach a control plane. Four ways out exist and none is obviously right. Exempt declared infrastructure containers from the identical-policy rule, which requires the platform to decide what counts as infrastructure. Make the effective namespace policy the union of the co-located policies, which widens the workload's boundary and contradicts §5. Move the sidecar out of the Pod, which is not always possible. Or make the sandbox unit the Pod after all and accept an expansion step for the per-container fields. This question blocks the container substrate for any deployment that uses sidecars, so it cannot stay open past phase 1.
 
-## 12. Non-normative notes
+## 12. Runtime substrates and non-normative notes
 
-- The sandbox model (one MicroVM per sandbox, each with its own kernel) is what makes principle 5 achievable at reasonable cost: kernel-level mechanisms can be enabled per sandbox without affecting the host. Module specs intentionally leave the choice of mechanism open.
-- That model is also what makes `process` a policy module rather than a wish. A per-sandbox kernel means a per-sandbox system-call surface: it can be narrowed for one tenant without coordinating with any other, and without the host-wide blast radius that makes syscall filtering unattractive on shared kernels. Inter-sandbox process isolation, by contrast, is a *property* of that model and deliberately absent from the policy object — there is no field for it because there is nothing for a user to decide.
+### 12.1 The sandbox unit on each substrate
+
+This proposal is written against two substrates, and every normative requirement in it fixes a property rather than a mechanism so that both can satisfy it. Nothing here is normative except where it says so; the purpose is to make the object implementable rather than aspirational.
+
+| | **VM substrate** | **Container substrate** |
+| --- | --- | --- |
+| Sandbox unit | One MicroVM, its own kernel | **One container** |
+| Policy attachment point | VM configuration + in-guest enforcement | Container `securityContext`, cgroup, and the CNI/data path |
+| Inter-sandbox isolation | Property of the VM boundary | Property of namespaces and the node's isolation posture |
+
+The sandbox unit on the container substrate is **one container, not one Pod**. That choice aligns the policy object with `securityContext`, which is per-container, so `process`, `filesystem`, and `resource` fields map without an expansion step: an init container is its own sandbox with its own policy, and a sidecar is another. It has one consequence that has to be stated rather than discovered, because it is the one place the mapping does not line up:
+
+**Containers in a Pod share one network namespace.** `policy.network` is therefore enforced at a scope *wider* than the sandbox unit. Two sandboxes in the same Pod cannot have different network policies, and a spec that pretended otherwise would describe an isolation that does not exist. [network.md](./network.md) §4.9 makes this normative: co-located sandboxes whose network policies do not resolve identically MUST be rejected, rather than silently taking the strictest — because silently applying one container's policy to another is the least debuggable failure this object could produce. The tension this creates with mesh sidecars, which legitimately need a wider network posture than the workload beside them, is real and unresolved; it is tracked as §11.14.
+
+### 12.2 Where the substrates diverge
+
+Most of the object is substrate-independent. The mechanisms below are commodity on both, and a deployment on either substrate is expected to declare them `enforced` (§8.2):
+
+| Policy surface | Mechanism on both substrates |
+| --- | --- |
+| `process.syscall.*` | A seccomp-style filter installed at process creation |
+| `process.noNewPrivileges` | The kernel's no-new-privileges flag |
+| `process.allowedCapabilities` | The bounding capability set |
+| `process.runAsNonRoot` | Resolved-uid check at start, plus denial of `setuid(0)` |
+| `resource.quota`, `resource.limits` | cgroup accounting and limits |
+| `network` connection state (§4.7) | Connection tracking in the data path |
+| `network.allowOut` / `denyOut` for addresses and CIDRs | Packet filtering at L3/L4 |
+| `network.rules` (L7) | An HTTP/HTTPS proxy in the egress path |
+
+Two surfaces genuinely differ, and these are the ones a capability set has to be honest about:
+
+1. **Path-level filesystem policy** (`denyPaths`, `readOnlyPaths`, `writableRoots`). On the VM substrate an in-guest LSM with per-process rule sets covers it directly. On the container substrate the equivalent is an unprivileged per-process path rule set where the kernel offers one, or a host-managed LSM profile generated per sandbox where it does not — the latter requiring node-level cooperation the policy object cannot compel. Where neither is available, the field is `unsupported`, and a read-only bind mount is **not** an acceptable stand-in for it (§8.2.1 rule 4).
+2. **Domain-based egress** (`allowOut` domain entries and their DNS learning). On the VM substrate this is a packet filter fed by DNS learning. On the container substrate the native network-policy primitive selects addresses and labels, not names, so domain support requires either a CNI that implements name-based policy or the L7 proxy already in the egress path. A deployment with neither declares domain entries `unsupported`; resolving the name once at create time and pinning the address is a different rule, not a partial one.
+
+`process` is affordable on both substrates, and an earlier draft of this document was wrong about why. A seccomp-style filter is **per-process**, so narrowing one sandbox's syscall surface cannot destabilise a neighbour on a shared kernel any more than it can on a dedicated one. What a dedicated kernel adds is not the ability to filter but freedom in *what* may be filtered: a shared kernel constrains the platform to the intersection of what every tenant on the node can tolerate for host-wide settings, while per-process filters remain fully available. The distinction matters because overstating it is how a specification ends up with a substrate requirement it does not actually need.
+
+### 12.3 Other notes
+
+- The VM substrate's one-kernel-per-sandbox model makes kernel-level mechanisms enableable per sandbox without affecting the host, which is why it appears first in §12.1. It is not a prerequisite for this proposal.
+- Inter-sandbox process isolation is a *property* of whichever substrate is in use, and deliberately absent from the policy object — there is no field for it because there is nothing for a user to decide.
 - Analogues studied: AWS Security Groups (including their stateful connection tracking and peer-group references), Kubernetes NetworkPolicy, Pod Security Standards and Pod Security Admission (whose `enforce`/`audit`/`warn` triple is what §7.2 adapts), E2B sandbox configuration.
 - The shape of §7.2 is a direct lesson from PodSecurityPolicy's replacement: the successor mechanism's most consequential addition was not a new control but the ability to *evaluate a stricter level without enforcing it*, because a security level nobody can rehearse is a security level nobody adopts. This proposal has three protections with exactly that adoption problem, which is why the mechanism is specified alongside the tiers rather than deferred.
 
