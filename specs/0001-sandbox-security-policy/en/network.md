@@ -164,7 +164,7 @@ Per [overview.md](./overview.md) §5.1.8, a time-bounded grant against this modu
 
 ## 6. Defaults
 
-Absence of `policy.network` resolves to the server-side default, which is the `baseline` tier ([overview.md](./overview.md) §7.1):
+Absence of `policy.network` resolves to the server-side default of whichever tier the policy resolved to ([overview.md](./overview.md) §7.1) — `restricted` for a `policy` object that omits `tier`.
 
 A request that carries no `policy` object at all resolves to `tier: compatibility` ([overview.md](./overview.md) §7), which is byte-for-byte today's behavior:
 

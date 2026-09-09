@@ -324,7 +324,7 @@ Operators asked the same question for every module: *"just give me a locked-down
 
 ```yaml
 policy:
-  tier: baseline | restricted | unrestricted   # default: baseline
+  tier: compatibility | baseline | restricted | unrestricted   # default: restricted (§7)
 ```
 
 The tier is a **default selector and nothing more**. This restraint is what keeps it from becoming a sixth policy dialect:

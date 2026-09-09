@@ -236,7 +236,7 @@ deniedSyscalls:
 
 采用哪一套默认值由 `policy.tier` 选择（[overview.md](./overview.md) §7.1）：
 
-| 字段 | `tier: baseline`（默认） | `tier: restricted` |
+| 字段 | `tier: baseline` | `tier: restricted`（默认） |
 | --- | --- | --- |
 | `mode` | `baseline` | `baseline` |
 | `syscall.mode` | `baseline` | `baseline` |

@@ -164,7 +164,7 @@ allow 先于 deny（第 3 步先于第 4 步）是今天的行为，予以保留
 
 ## 6. 默认值
 
-缺省 `policy.network` 解析为服务端默认值，即 `baseline` 分级（[overview.md](./overview.md) §7.1）：
+缺省 `policy.network` 解析为策略所解析到的那个分级的服务端默认值（[overview.md](./overview.md) §7.1）—— 对于省略 `tier` 的 `policy` 对象即 `restricted`。
 
 完全不带 `policy` 对象的请求解析为 `tier: compatibility`（[overview.md](./overview.md) §7），而它逐字节等于今天的行为：
 

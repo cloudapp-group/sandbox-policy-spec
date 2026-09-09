@@ -324,7 +324,7 @@ DELETE /sandboxes/{id}/grants/{grantID}    提前撤销
 
 ```yaml
 policy:
-  tier: baseline | restricted | unrestricted   # 默认：baseline
+  tier: compatibility | baseline | restricted | unrestricted   # 默认：restricted（§7）
 ```
 
 分级是一个**默认值选择器，仅此而已**。正是这份克制，让它不会变成第六种策略方言：

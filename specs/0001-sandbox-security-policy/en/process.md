@@ -236,7 +236,7 @@ Setting `allowedSyscalls` under `mode: denylist`, or `deniedSyscalls` under `mod
 
 Which defaults apply is selected by `policy.tier` ([overview.md](./overview.md) §7.1):
 
-| Field | `tier: baseline` (default) | `tier: restricted` |
+| Field | `tier: baseline` | `tier: restricted` (default) |
 | --- | --- | --- |
 | `mode` | `baseline` | `baseline` |
 | `syscall.mode` | `baseline` | `baseline` |

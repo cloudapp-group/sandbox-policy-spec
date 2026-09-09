@@ -183,7 +183,7 @@ denyPaths:
 
 由 `policy.tier` 选择适用哪一套默认值（[overview.md](./overview.md) §7.1）：
 
-| | `tier: baseline`（默认） | `tier: restricted` |
+| | `tier: baseline` | `tier: restricted`（默认） |
 | --- | --- | --- |
 | `mode` | `baseline` | `baseline` |
 | `baselineVersion` | 平台默认值 | 平台默认值 |

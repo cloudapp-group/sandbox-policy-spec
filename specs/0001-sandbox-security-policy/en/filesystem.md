@@ -183,7 +183,7 @@ Therefore, when `writableRoots` is non-empty, these paths are **implicitly writa
 
 Which defaults apply is selected by `policy.tier` ([overview.md](./overview.md) §7.1):
 
-| | `tier: baseline` (default) | `tier: restricted` |
+| | `tier: baseline` | `tier: restricted` (default) |
 | --- | --- | --- |
 | `mode` | `baseline` | `baseline` |
 | `baselineVersion` | platform default | platform default |
