@@ -189,15 +189,13 @@ The distinction worth keeping straight: a shadow finding elsewhere in the propos
 2. Held sandboxes do not auto-release. Release happens only through the approval API or a policy update.
 3. Approval API:
 
-   ```
-   POST /sandboxes/{sandboxID}/resource/approval
-   {
-     "dimension":  "llmTokens.total",  // optional; omit to decide all current holds
-     "window":     "month",            // optional; omitted with dimension → all holds of that dimension
-     "decision":   "approve" | "deny",
-     "allowance":  1000000,            // approve only, optional: extra headroom for the current window period
-     "raiseLimit": 60000000            // approve only, optional: persistent limit raise for this sandbox
-   }
+   ```yaml
+   # POST /sandboxes/{sandboxID}/resource/approval
+   dimension:  llmTokens.total   # optional; omit to decide all current holds
+   window:     month             # optional; omitted with dimension → all holds of that dimension
+   decision:   approve           # approve | deny
+   allowance:  1000000           # approve only, optional: extra headroom for the current window period
+   raiseLimit: 60000000          # approve only, optional: persistent limit raise for this sandbox
    ```
 
    - `approve` resumes the sandbox. `allowance` adds to the current window period's allowance only (reverts at rollover); `raiseLimit` updates the sandbox's effective limit persistently.
@@ -219,24 +217,19 @@ The distinction worth keeping straight: a shadow finding elsewhere in the propos
 
 1. `GET /sandboxes/{sandboxID}` MUST include a `resource` object:
 
-   ```json
-   "resource": {
-     "quota": {"cpuMillicores": 2000, "memoryMiB": 2048, "netBandwidthKbps": 51200},
-     "usage": {
-       "cpuSeconds": {
-         "current": {"minute": 12.3, "hour": 300.5, "lifetime": 12345.6},
-         "limits":  {"hour": 600, "lifetime": 100000}
-       },
-       "llmTokens": {
-         "total": {
-           "current": {"minute": 3500, "day": 155000, "lifetime": 1200000},
-           "limits":  {"minute": 10000, "day": 1000000, "month": 50000000},
-           "provenance": {"response": 1150000, "estimated": 40000, "reported": 10000}
-         }
-       }
-     },
-     "state": {"held": false, "exhausted": []}
-   }
+   ```yaml
+   resource:
+     quota: { cpuMillicores: 2000, memoryMiB: 2048, netBandwidthKbps: 51200 }
+     usage:
+       cpuSeconds:
+         current: { minute: 12.3, hour: 300.5, lifetime: 12345.6 }
+         limits:  { hour: 600, lifetime: 100000 }
+       llmTokens:
+         total:
+           current:    { minute: 3500, day: 155000, lifetime: 1200000 }
+           limits:     { minute: 10000, day: 1000000, month: 50000000 }
+           provenance: { response: 1150000, estimated: 40000, reported: 10000 }
+     state: { held: false, exhausted: [] }
    ```
 
 2. `limits` reports the effective configured windows; `current` reports the in-window counters for the configured windows. Lifetime counters MUST be reported even when no lifetime limit is configured (billing needs them).

@@ -189,15 +189,13 @@ policy:
 2. held 沙箱不自动解除。解除只能通过审批 API 或策略更新。
 3. 审批 API：
 
-   ```
-   POST /sandboxes/{sandboxID}/resource/approval
-   {
-     "dimension":  "llmTokens.total",  // 可选；缺省表示对该沙箱当前全部 hold 做出决定
-     "window":     "month",            // 可选；与 dimension 一起缺省 → 该维度的全部 hold
-     "decision":   "approve" | "deny",
-     "allowance":  1000000,            // 仅 approve，可选：为当前窗口周期追加的额度
-     "raiseLimit": 60000000            // 仅 approve，可选：对该沙箱持久提升限额
-   }
+   ```yaml
+   # POST /sandboxes/{sandboxID}/resource/approval
+   dimension:  llmTokens.total   # 可选；缺省表示对该沙箱当前全部 hold 做出决定
+   window:     month             # 可选；与 dimension 一起缺省 → 该维度的全部 hold
+   decision:   approve           # approve | deny
+   allowance:  1000000           # 仅 approve，可选：为当前窗口周期追加的额度
+   raiseLimit: 60000000          # 仅 approve，可选：对该沙箱持久提升限额
    ```
 
    - `approve` 恢复沙箱。`allowance` 仅增加当前窗口周期的额度（翻转时失效）；`raiseLimit` 持久更新该沙箱的生效限额。
@@ -219,24 +217,19 @@ policy:
 
 1. `GET /sandboxes/{sandboxID}` **必须**包含 `resource` 对象：
 
-   ```json
-   "resource": {
-     "quota": {"cpuMillicores": 2000, "memoryMiB": 2048, "netBandwidthKbps": 51200},
-     "usage": {
-       "cpuSeconds": {
-         "current": {"minute": 12.3, "hour": 300.5, "lifetime": 12345.6},
-         "limits":  {"hour": 600, "lifetime": 100000}
-       },
-       "llmTokens": {
-         "total": {
-           "current": {"minute": 3500, "day": 155000, "lifetime": 1200000},
-           "limits":  {"minute": 10000, "day": 1000000, "month": 50000000},
-           "provenance": {"response": 1150000, "estimated": 40000, "reported": 10000}
-         }
-       }
-     },
-     "state": {"held": false, "exhausted": []}
-   }
+   ```yaml
+   resource:
+     quota: { cpuMillicores: 2000, memoryMiB: 2048, netBandwidthKbps: 51200 }
+     usage:
+       cpuSeconds:
+         current: { minute: 12.3, hour: 300.5, lifetime: 12345.6 }
+         limits:  { hour: 600, lifetime: 100000 }
+       llmTokens:
+         total:
+           current:    { minute: 3500, day: 155000, lifetime: 1200000 }
+           limits:     { minute: 10000, day: 1000000, month: 50000000 }
+           provenance: { response: 1150000, estimated: 40000, reported: 10000 }
+     state: { held: false, exhausted: [] }
    ```
 
 2. `limits` 报告生效的已配置窗口；`current` 报告已配置窗口的窗口内计数器。即使未配置 lifetime 限额，lifetime 计数器也**必须**上报（计费需要它）。
