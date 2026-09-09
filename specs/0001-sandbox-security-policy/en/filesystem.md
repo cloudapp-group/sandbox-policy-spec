@@ -274,12 +274,12 @@ Denials MUST NOT be distinguishable from ordinary permission failures in a way t
 
 ## 11. Non-normative notes
 
-- Each sandbox owns a whole kernel on the VM substrate, so the requirements in §4.3 can be met by in-guest, unprivileged, per-process mechanisms (e.g. an LSM with per-process rule sets, or equivalent syscall-level enforcement). The spec intentionally mandates only the *properties*, not the mechanism. [process.md](./process.md) §4.5 states the same requirements for the syscall surface, and the two are expected to be satisfiable by one mechanism.
+- Each sandbox owns a whole kernel on the VM substrate, so the requirements in §4.3 can be met by in-guest, unprivileged, per-process mechanisms (e.g. an LSM with per-process rule sets, or equivalent syscall-level enforcement). The spec intentionally mandates only the *properties*, not the mechanism. [process.md](./process.md) §4.5 states the same requirements for the syscall surface, and the two are expected to be satisfiable by one mechanism. Note that on that substrate the mechanism is installed from *inside* the guest, which attaches a trust precondition to the result rather than to the mechanism ([overview.md](./overview.md) §12.2): the rules hold while the workload cannot reach the process that installed them.
 - **This module is one of the two places where the substrates genuinely differ** ([overview.md](./overview.md) §12.2), and it is worth being concrete about the shape of the difference rather than leaving it as "depends on the platform":
 
   | Path | How §4.2 is realized | Capability state to declare |
   | --- | --- | --- |
-  | VM substrate, in-guest LSM with per-process rule sets | Directly: patterns become rule sets attached to each process | `enforced` |
+  | VM substrate, in-guest LSM with per-process rule sets | Directly: patterns become rule sets attached to each process | `enforced`, qualified by the §12.2 precondition |
   | Container substrate, unprivileged per-process path rule set in the kernel | Directly, within the operations that interface covers | `enforced`, or `partial` where the interface does not cover an operation the module specifies |
   | Container substrate, host-managed LSM profile generated per sandbox | Directly, but requires node-level cooperation the policy object cannot compel | `enforced` where the deployment controls its nodes |
   | Neither available | — | `unsupported` |

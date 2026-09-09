@@ -127,15 +127,15 @@ The granularity in the second row is the point of this section, and it is a limi
 
 ### 4.9 Enforcement scope
 
-Every other module in this proposal enforces at the sandbox unit. This one does not always, and the difference is a property of the substrate rather than a choice:
+Every module in this proposal enforces at the sandbox unit, and this one is no exception — but only because the sandbox unit was chosen to make it true:
 
-1. This policy is enforced on the **network namespace** the sandbox occupies. On the VM substrate that namespace belongs to exactly one sandbox, and scope and sandbox coincide.
-2. On the container substrate a sandbox is one container ([overview.md](./overview.md) §12.1), and co-located containers **share** a namespace. The enforcement scope is therefore wider than the sandbox.
-3. Where two or more sandboxes share a namespace, their `policy.network` MUST resolve to an identical effective configuration. A create request that would place a sandbox into a namespace whose existing effective network policy differs MUST be rejected with `400 POLICY_NETWORK_SCOPE_CONFLICT`, carrying the conflicting fields and the sandbox that established the current configuration.
-4. The platform MUST NOT resolve such a conflict by taking the strictest value, the union, or the most recent. Each of those silently makes one sandbox's policy govern another's traffic, which is both a boundary this object does not describe and the least debuggable failure it could produce: an operator reading either sandbox's effective policy would see a document that does not match the packets.
-5. Rule 3 is a create-time check against *resolved* configurations, not a textual comparison. Two sandboxes that arrive at the same effective policy through different sources satisfy it.
+1. This policy is enforced on the **network namespace** the sandbox occupies. On the VM substrate that namespace belongs to exactly one sandbox. On the container substrate the sandbox unit is one Pod ([overview.md](./overview.md) §12.1), and a Pod owns exactly one network namespace. On both substrates, therefore, scope and sandbox coincide.
+2. That coincidence is the reason §12.1 makes the Pod the unit rather than the container. A per-container unit would place this policy at a scope wider than the sandbox, and no correct behaviour is available there: an enforcement point in the datapath or the egress path attributes a connection by source address, and co-located containers share one, so the platform could not determine whose policy to apply.
+3. A deployment MUST NOT place two sandboxes in one network namespace. Where an implementation nonetheless does — a runtime that shares a namespace across units, or a deployment that constructs one by hand — the create request MUST be rejected with `400 POLICY_NETWORK_SCOPE_CONFLICT` carrying the conflicting fields and the sandbox that established the current configuration, rather than proceeding.
+4. The platform MUST NOT resolve such a case by taking the strictest value, the union, or the most recent. Each of those silently makes one sandbox's policy govern another's traffic, which is both a boundary this object does not describe and the least debuggable failure it could produce: an operator reading either sandbox's effective policy would see a document that does not match the packets.
+5. Rule 3 is a create-time check against *resolved* configurations, not a textual comparison. Two sandboxes that arrive at the same effective policy through different sources would satisfy it — though under rule 3 they should not be sharing a namespace in the first place.
 
-Rule 3 forbids the workload-plus-sidecar shape that most container deployments actually use, and this spec does not yet have an answer for it — see [overview.md](./overview.md) §11.14. Stating the conflict as a rejection is deliberate: it makes the gap visible at create time, on the substrate where it exists, instead of letting a mesh proxy quietly inherit a lockdown intended for the workload next to it, or the reverse.
+What this arrangement does not solve is the *other* half of the co-location question. Containers inside one Pod are inside one sandbox, so they share this policy by construction and no conflict arises here; but they also share one `policy.process` and one `policy.filesystem`, expanded across containers that may legitimately need different postures — a mesh proxy beside agent-generated code. That tension moved rather than vanished, and it is tracked as [overview.md](./overview.md) §11.14.
 
 ## 5. Merge semantics
 
@@ -203,7 +203,7 @@ Two module-specific points:
 | `INVALID_POLICY` | 400 | `{field, reason}` | Malformed entry (e.g. domain in `denyOut`, invalid CIDR). |
 | `POLICY_NETWORK_LIMIT` | 400 | `{map, got, max}` | Final unique entry count exceeds a map limit. |
 | `POLICY_NETWORK_CONFLICT` | 400 | `{field, legacyField}` | A legacy field and `policy.network` are both present (§8). |
-| `POLICY_NETWORK_SCOPE_CONFLICT` | 400 | `{fields, establishedBy}` | A sandbox would join a shared network namespace whose effective policy differs (§4.9.3). |
+| `POLICY_NETWORK_SCOPE_CONFLICT` | 400 | `{fields, establishedBy}` | A sandbox would be placed into a network namespace another sandbox already occupies (§4.9.3). |
 | `POLICY_UNSUPPORTED` | 400 | `{field, state, capabilityVersion}` | Under `enforcement: strict`, the policy names a field this deployment declares `unsupported` ([overview.md](./overview.md) §8.2.2). Domain entries in `allowOut` are the field most likely to be in that state — see §11. |
 
 Egress rejections at runtime are **not** API errors; they surface to the sandbox as connection failures (`ECONNREFUSED`-class TCP resets for rejected TCP, drops otherwise), exactly as today. Under `onViolation: kill` (§4.8) the sandbox is terminated instead, and the terminal state records the destination and the matched rule as the cause.
