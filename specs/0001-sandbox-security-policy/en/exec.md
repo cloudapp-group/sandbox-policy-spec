@@ -8,7 +8,7 @@ Part of [Proposal 0001 — Sandbox Security Policy](./overview.md). The key word
 
 This spec defines the exec sub-policy of the `SandboxPolicy` object: constraints on command execution **initiated through the sandbox control interface** (process start, code run, interactive sessions).
 
-It does **not** constrain processes the sandbox workload starts on its own once running; that is the territory of the modules that enforce below the control interface — [process.md](./process.md) for privilege gain, persistence, and system calls, [filesystem.md](./filesystem.md) for paths, [network.md](./network.md) for destinations, and [resource.md](./resource.md) for consumption. This boundary is stated explicitly because it is the main honest limitation of exec policy, and §3.6 quantifies what it costs: for agent-generated code, an allowlist that admits an interpreter bounds almost nothing. See the defense-in-depth matrix in [overview.md](./overview.md) §2.3 for which module answers which threat.
+It does **not** constrain processes the sandbox workload starts on its own once running; that is the territory of the modules that enforce below the control interface — [process.md](./process.md) for privilege gain, persistence, and system calls, [filesystem.md](./filesystem.md) for paths, [network.md](./network.md) for destinations, and [resource.md](./resource.md) for consumption. This boundary is stated explicitly because it is the main honest limitation of exec policy, and §3.5 quantifies what it costs: for agent-generated code, an allowlist that admits an interpreter bounds almost nothing. See the defense-in-depth matrix in [overview.md](./overview.md) §2.3 for which module answers which threat.
 
 One consequence is worth naming here, because it is where readers most often expect this module to do something it cannot. "Block dangerous system commands" is a requirement this module can only answer for commands *submitted through the API*. A denylist entry for `insmod` does not stop a Python script from loading a kernel module, and no amount of pattern grammar will change that — [process.md](./process.md) §4.3 does, by denying the `init_module` system call. Where the two overlap, both are worth having: the exec rule produces a legible, attributable denial at the API, and the process rule is the one that actually holds.
 
@@ -68,40 +68,53 @@ The asymmetry is what makes both modes safe, and each consequence is intended:
 4. If the token cannot be resolved to an executable, the identity set holds only the literal token. In `allowlist` mode nothing matches and the request is denied; in `denylist` mode the literal token is still matched, and the execution then fails on its own with the platform's usual "not found" behavior.
 5. Resolution MUST be performed by the platform, in the sandbox's filesystem view, at evaluation time. A path supplied in the request MUST NOT be trusted as the resolution result.
 
-### 3.3 Argument normalization
+### 3.3 Indeterminate input is rejected, not parsed
 
-Before matching, each sub-command's argument vector MUST be normalized into a **canonical argument vector**:
+An earlier revision specified a shell parser: it decomposed operators, extracted wrapped commands from `env`/`sudo`/`xargs`, parsed `sh -c` bodies recursively, resolved aliases and shell functions, normalised `--name=value` into two arguments, and bounded the recursion at depth 8.
 
-1. An argument of the form `--name=value` MUST be split into two arguments, `--name` and `value`. Rule patterns are normalized identically, so an author may write either spelling and both invocation forms match.
-2. Bundled short options (`-sSL`) MUST NOT be split. They match literally; a rule that must catch a short option lists the spellings it cares about.
-3. Quote removal and word splitting follow shell rules and happen before normalization. Matching operates on the resulting vector, never on the raw string (§4.4.1) — so `c"ur"l` is the command token `curl`.
-4. Leading environment assignments (`VAR=x cmd`) are not arguments of `cmd`; they are handled as an implicit wrapper by §3.4.
+All of that is removed, and not because the parsing was wrong. It is that a parser is the wrong shape for this job. Every parser has a corpus it handles and an edge it does not, and on a security boundary the edge is exactly where the bypass lives — a matcher that misses `env FOO=1 curl` is not a weaker version of one that catches it, it is a hole. That machinery was also the most expensive surface in the proposal to implement correctly (§11), which is a poor trade for a gate whose reach §3.5 already bounds.
 
-### 3.4 Wrappers and launchers
+The replacement is fail-closed and fits in one rule:
 
-Several standard commands exist in order to run *another* command. Matching only the wrapper would let `env curl x` walk past a rule for `curl`. Therefore:
+1. **A command line whose executed program cannot be determined statically MUST be rejected** — not analysed, not admitted on a best-effort basis. This holds under `allowlist` and `denylist` alike.
+2. The following constructs make a command line indeterminate:
 
-1. When a sub-command's resolved executable is a **wrapper**, the wrapped command MUST be extracted and evaluated as an additional sub-command, recursively. Both the wrapper and the wrapped command are subject to §4.1.
-2. The v1 wrapper set is fixed: `env`, `sudo`, `doas`, `nice`, `ionice`, `nohup`, `setsid`, `stdbuf`, `time`, `timeout`, `chroot`, `unshare`, `flock`, `xargs`, `watch`, `script`, `strace`, `ltrace`.
-3. A leading environment-assignment sequence (`VAR=x VAR2=y cmd ...`) MUST be treated as an implicit `env` wrapper: the assignments are stripped and `cmd ...` is evaluated as a sub-command.
-4. If a wrapper's wrapped command cannot be determined statically — it arrives on stdin, comes from a file, or uses a construct this spec does not define — the request MUST be rejected with `POLICY_EXEC_UNPARSEABLE` in **both** `allowlist` and `denylist` mode. Guessing is a bypass vector, by the same reasoning as §4.3.4.
+   | Construct | Example |
+   | --- | --- |
+   | Shell operators | `\|`, `\|\|`, `&&`, `;`, `&` |
+   | Command substitution | `$(...)`, backticks |
+   | Redirection, here-documents, here-strings | `>`, `<`, `<<EOF`, `<<<` |
+   | Unbalanced quotes or syntax this spec does not define | `c"url x` |
+   | A wrapper or an interpreter (§3.4) | `sudo curl x`, `sh -c '...'` |
 
-### 3.5 Interpreters and inline scripts
+3. Rejection is `POLICY_EXEC_UNPARSEABLE` carrying a `reason` that names the construct found, so the caller learns what to remove rather than that "something" was wrong.
+4. Matching therefore operates on exactly **one** argument vector — the request's own, after the platform's quote removal and word splitting. There is no sub-command set, no transitive closure, no recursion, and no depth limit, because there is nothing left to recurse into.
+5. Argument patterns are matched literally against that vector, with no normalisation. `--url=x` and `--url x` are **different** invocations and a rule that must catch both lists both. This is a deliberate loss of convenience: normalisation was a small parser with the same edge problem as the large one.
 
-1. When a sub-command is a **shell** (`sh`, `bash`, `dash`, `zsh`, `ksh`, `ash`) invoked with `-c`, the script text MUST be parsed and its sub-commands evaluated recursively.
-2. When a shell's script text arrives through a here-document (`sh <<'EOF' … EOF`) or a here-string, that text MUST likewise be parsed and evaluated recursively. A here-document body that is **not** fed to an interpreter is data and MUST NOT be treated as sub-commands.
-3. When a shell reads its script from stdin or from a file that is not part of the request (`sh -s`, `sh script.sh`, `curl x | sh`), the content is not statically knowable. The shell invocation itself is evaluated as a sub-command and this spec makes no claim about what it will subsequently run.
-4. Alias and shell-function definitions appearing in the command line MUST be resolved before matching, and an invocation of a name defined earlier in the same line MUST be evaluated against its definition. If a definition cannot be resolved statically, the request MUST be rejected with `POLICY_EXEC_UNPARSEABLE`.
-5. Recursive evaluation — wrappers, `-c` bodies, substitutions — MUST be bounded at a nesting depth of 8. Exceeding it MUST be rejected with `POLICY_EXEC_UNPARSEABLE` carrying `{reason: "nesting_depth_exceeded"}`.
-6. Inline code for a **non-shell** interpreter (`python -c`, `node -e`, `perl -e`, `ruby -e`, `awk`) MUST NOT be analyzed. It is opaque to this spec, and pretending otherwise would be worse than admitting it.
+This is stricter than what it replaces. A command line that used to be decomposed and then admitted is now refused outright. That is the intended direction — `exec` is a gate, and a gate that cannot identify what is passing through it should close rather than guess.
 
-### 3.6 Honest limits of command matching
+### 3.4 Wrappers and interpreters
 
-§3.5.6 and §1 combine into a limit that MUST be stated rather than papered over:
+Two families of program are indeterminate by their nature, because their entire purpose is to run something else. Both are named here so that §3.3 rule 2 has a definite referent:
 
-1. Admitting any shell or general-purpose interpreter in an `allowlist` — directly, through a wrapper, or as a build tool that shells out — makes that allowlist **effectively unrestricted** for everything the interpreter can do. Matching sees the interpreter invocation, not the program it runs.
-2. Therefore, when a policy sets `mode: allowlist` and any `allowedCommands` rule resolves to a known shell or general-purpose interpreter, the create/update response MUST include a `policyWarnings` entry `{field, rule, reason: "interpreter_admitted"}` recording that the allowlist does not bound what that rule may execute.
-3. `exec` is a control-interface gate, not a containment boundary. Containment for whatever an interpreter starts is the job of `process`, `filesystem`, `network`, and `resource` — see [overview.md](./overview.md) §2.3. Concretely, the `interpreter_admitted` warning is the point at which a deployment should be reading `process.syscall` and `filesystem.denyPaths`, because those are what still apply after the interpreter starts.
+| Family | v1 set |
+| --- | --- |
+| **Wrappers** | `env`, `sudo`, `doas`, `nice`, `ionice`, `nohup`, `setsid`, `stdbuf`, `time`, `timeout`, `chroot`, `unshare`, `flock`, `xargs`, `watch`, `script`, `strace`, `ltrace` |
+| **Interpreters** | `sh`, `bash`, `dash`, `zsh`, `ksh`, `ash`, `python`, `python3`, `node`, `perl`, `ruby`, `awk` |
+
+1. Under `allowlist`, a request whose resolved executable (§3.2) is in either set MUST be rejected with `POLICY_EXEC_UNPARSEABLE` and `reason: wrapper` or `reason: interpreter`.
+2. A leading environment-assignment sequence (`VAR=x cmd ...`) is an implicit `env` wrapper and is rejected on the same terms. The assignments are not stripped and the wrapped command is not evaluated; the request simply does not pass.
+3. **Naming a wrapper or interpreter in `allowedCommands` does not admit it.** Such a rule is dead configuration, and the platform MUST report it at create time as a `policyWarnings` entry `{field, rule, reason: "rule_never_matches"}`. Admitting `sudo` would admit `sudo sh`, and admitting `python` would admit everything Python can do — which is the bypass this section closes.
+4. Under `denylist` the same request is evaluated against the denylist on its own resolved identity and, if nothing matches, admitted. A denylist makes no completeness claim (§4.1), so it has nothing to fail closed about; a deployment that wants wrapped invocations to work uses `denylist` or `unrestricted` and takes its containment from `process`, `filesystem`, and `network`, which is where the containment was in any case (§3.5).
+5. Both sets are fixed in v1. Their evolution is §10.5.
+
+### 3.5 Honest limits of command matching
+
+§3.4 closes the *declared* interpreter, and it is worth being exact about how little that buys, because the gap is structural rather than a gap in the sets:
+
+1. A program admitted by an allowlist may start an interpreter itself. `make`, `npm`, `cargo`, `pytest`, and every build tool in ordinary use shell out as part of doing their job, and none of them is a wrapper or an interpreter by §3.4. Matching sees the invocation it was given; it does not see what that program forks. **An `allowlist` therefore bounds what may be *submitted*, never what may be *run*.**
+2. This is why §3.4 rejects rather than merely warns: refusing `sh -c` at the API removes the cheapest path, and there is no mechanism at this layer that removes the others.
+3. `exec` is a control-interface gate, not a containment boundary. Containment for whatever an admitted program starts belongs to `process`, `filesystem`, `network`, and `resource` — see [overview.md](./overview.md) §2.3. Concretely: a deployment reading this section should be configuring `process.syscall` and `filesystem.denyPaths`, because those are the rules that still apply after the first process exists.
 
 ## 4. Evaluation semantics
 
@@ -118,27 +131,25 @@ Several standard commands exist in order to run *another* command. Matching only
 For each execution request, in order:
 
 1. Resolve the requested user (default: the sandbox's default user). If `allowedUsers` is non-empty and the user is not listed → `POLICY_EXEC_USER_DENIED`.
-2. Shell-parse the command line (§4.3) and evaluate mode matching per sub-command.
+2. Determine the command line's executed program (§3.3); reject if indeterminate, otherwise evaluate mode matching on the single argument vector.
 3. Clamp the requested timeout: effective timeout = `min(requested, maxTimeoutSec)`; when clamped, the response MUST include `effectiveTimeoutSec`. Requests with no explicit timeout use `maxTimeoutSec` as the ceiling, not as the default (the existing default timeout semantics are unchanged).
 4. Concurrency: if the count of currently-running executions is ≥ `maxConcurrent` (when > 0) → `POLICY_EXEC_CONCURRENCY_LIMIT` with `retryAfterSec`.
 
 Steps 1–2 are policy checks; steps 3–4 are constraints that also apply in `unrestricted` mode.
 
-### 4.3 Composite commands
+### 4.3 Composite command lines
 
-1. A command line containing shell operators (`|`, `||`, `&&`, `;`, `&`, command substitution `$(...)` or backticks) MUST be shell-parsed into sub-commands before matching.
-2. Every sub-command is matched independently; the overall request is rejected if any sub-command is rejected (§4.1).
-3. Command substitution MUST be treated as a sub-command at the position it occurs.
-4. If the command line cannot be parsed unambiguously (unbalanced quotes, unrecognized syntax), the request MUST be rejected with `POLICY_EXEC_UNPARSEABLE` rather than executed on a best-effort basis. Best-effort execution of ambiguous input is a bypass vector.
-5. The sub-command set is the **transitive closure** over operators, command substitutions, wrapper extraction (§3.4) and inline shell scripts (§3.5), bounded by the depth limit of §3.5.5.
-6. Redirections and here-document bodies are data, not sub-commands, except where §3.5.2 feeds them to an interpreter.
+1. A command line containing any construct in the §3.3 table MUST be rejected with `POLICY_EXEC_UNPARSEABLE` and the construct named in `reason`. It MUST NOT be decomposed, and it MUST NOT be executed on a best-effort basis.
+2. This applies in `allowlist` and `denylist` alike, and it applies before mode matching — there is no sub-command to match.
+3. `unrestricted` mode does not evaluate command rules at all, so a composite line runs there as it does today. The timeout and concurrency constraints of §4.2 still apply.
+4. The consequence to state plainly: `curl x | sh` is refused rather than analysed, and so is `make build` **only if** `make` is a wrapper or interpreter, which it is not (§3.5.1). The first is closed at the API; the second is not closeable here at all.
 
 ### 4.4 Enforcement requirements
 
 1. Matching MUST operate on the parsed argument vector, never on raw string containment.
 2. User resolution MUST happen through the platform's user database, not by string comparison with prompt text.
 3. The per-request `user` parameter of the existing process API is the only user-switching surface; policy applies identically to it.
-4. Executable resolution (§3.2), wrapper extraction (§3.4) and inline-script parsing (§3.5) MUST all happen inside the enforcement path, so that the decision is taken on the same identity that is then executed. An implementation MUST NOT resolve for matching and re-resolve for execution.
+4. Executable resolution (§3.2) and the indeterminacy check (§3.3) MUST both happen inside the enforcement path, so that the decision is taken on the same identity that is then executed. An implementation MUST NOT resolve for matching and re-resolve for execution.
 
 ## 5. Field specification
 
@@ -169,7 +180,7 @@ exec:
 
 `unrestricted` + `maxTimeoutSec` ceiling is the deliberate v1 default: it changes nothing about *what* may run, but bounds the damage of a forgotten timeout. Templates that need stronger guarantees SHOULD ship `mode: allowlist` defaults.
 
-The above is the `baseline` tier ([overview.md](./overview.md) §7.1). `tier: restricted` changes exactly one field here — `audit: metadata` — and deliberately leaves `mode` at `unrestricted`. Two reasons, both already stated elsewhere and repeated because their absence would look like an oversight: `allowlist` requires a non-empty `allowedCommands` (§5), so a tier selecting it would make `tier: restricted` alone fail validation; and per §3.6 an allowlist is not what contains an admitted interpreter anyway. A deployment that wants a command allowlist declares it, because only that deployment knows its command list. What the tier can supply without guessing is the audit trail, so that is what it supplies.
+The above is the `baseline` tier ([overview.md](./overview.md) §7.1). `tier: restricted` changes exactly one field here — `audit: metadata` — and deliberately leaves `mode` at `unrestricted`. Two reasons, both already stated elsewhere and repeated because their absence would look like an oversight: `allowlist` requires a non-empty `allowedCommands` (§5), so a tier selecting it would make `tier: restricted` alone fail validation; and per §3.5 an allowlist is not what contains an admitted interpreter anyway. A deployment that wants a command allowlist declares it, because only that deployment knows its command list. What the tier can supply without guessing is the audit trail, so that is what it supplies.
 
 ### 6.1 Shadow evaluation support
 
@@ -182,7 +193,7 @@ Two consequences follow:
 1. An `auditTier` that names only this module's fields MUST still be accepted if it is valid under [overview.md](./overview.md) §7.2.2 — the validation rule is about tiers, not about how much each module has to say. The effective policy records it, and no shadow events result.
 2. If the stricter fourth tier contemplated in [overview.md](./overview.md) §11.4 is ever defined, it *does* require an `exec` allowlist, and shadow evaluation of this module becomes both meaningful and easy: the command is already parsed into subcommands at the control interface (§4.3), so evaluating a second rule set against the same decomposition costs one more pass. Support would then be: a command the shadow allowlist would reject **runs anyway** and emits a `shadow: true` event naming the unmatched subcommand. That is the mechanism this module would use; there is currently no tier that asks for it.
 
-The broader point is the one §3.6 already makes. Even a fully shadowed `exec` allowlist would report only on commands submitted through the API, which for agent-generated code is one interpreter invocation followed by silence. The shadow findings that tell an operator whether `restricted` is adoptable come from `process`, `filesystem`, and `network`.
+The broader point is the one §3.5 already makes. Even a fully shadowed `exec` allowlist would report only on commands submitted through the API, which for agent-generated code is one interpreter invocation followed by silence. The shadow findings that tell an operator whether `restricted` is adoptable come from `process`, `filesystem`, and `network`.
 
 ## 7. Errors and observability
 
@@ -193,11 +204,11 @@ Structured error payloads (all enforcement errors carry them so agents can self-
 | `POLICY_EXEC_DENIED` | `{rule, subCommand, mode}` | Mode matching rejected a sub-command. |
 | `POLICY_EXEC_USER_DENIED` | `{user, allowedUsers}` | User not in `allowedUsers`. |
 | `POLICY_EXEC_CONCURRENCY_LIMIT` | `{maxConcurrent, running, retryAfterSec}` | Concurrency cap reached. |
-| `POLICY_EXEC_UNPARSEABLE` | `{reason}` | Ambiguous command line (§4.3.4). `reason` is one of `unbalanced_quotes`, `unknown_syntax`, `indeterminate_wrapper` (§3.4.4), `unresolvable_alias` (§3.5.4), `nesting_depth_exceeded` (§3.5.5). |
+| `POLICY_EXEC_UNPARSEABLE` | `{reason}` | Indeterminate command line (§3.3, §4.3). `reason` is one of `shell_operator`, `command_substitution`, `redirection`, `unbalanced_quotes`, `unknown_syntax`, `wrapper`, `interpreter`. |
 | `POLICY_GRANT_INVALID` (400) | `{field, reason}` | A grant targeting a non-grantable field of this module (§8.1). |
 | `INVALID_POLICY` (400) | `{field, reason}` | Configuration-time validation. |
 
-Non-fatal findings are returned in a `policyWarnings` array on the create/update response; a warning never changes the outcome of the request. Defined warning: `interpreter_admitted` (§3.6.2).
+Non-fatal findings are returned in a `policyWarnings` array on the create/update response; a warning never changes the outcome of the request. Defined warning: `rule_never_matches` (§3.5.2).
 
 Audit events (`audit: metadata`): `{sandboxID, user, command, effectiveTimeoutSec, exitCode, outcome: allowed|denied, rule?}`. `full` adds stdout/stderr excerpts capped at a fixed byte limit. Audit events MUST NOT be emitted into the sandbox itself.
 
@@ -209,7 +220,7 @@ Per [overview.md](./overview.md) §8.1.6, this module states its position: **it 
 
 The enforcement point is the control interface, so a violation is caught *before* the process exists. There is nothing to kill — the whole point of §4.2 is that the command never ran — and `deny` is the only coherent outcome. A field with one legal value is worse than no field, because it implies the existence of a second value.
 
-This is also the cleanest illustration of why `kill` is not universally available (§8.1.3 of [overview.md](./overview.md)): the action a module can take on a violation is bounded by where the module enforces. `exec` sits early enough that refusal is total, which is exactly why §3.6 keeps insisting that its refusals cover so little.
+This is also the cleanest illustration of why `kill` is not universally available (§8.1.3 of [overview.md](./overview.md)): the action a module can take on a violation is bounded by where the module enforces. `exec` sits early enough that refusal is total, which is exactly why §3.5 keeps insisting that its refusals cover so little.
 
 ## 8. Merge semantics
 
@@ -235,7 +246,7 @@ Per [overview.md](./overview.md) §5.1.8, a time-bounded grant against this modu
 | `maxConcurrent` — a higher value | `audit` — no reduction |
 | | `maxTimeoutSec` — no higher value |
 
-1. A grant of `allowedCommands` adds named rules for the duration of the grant. Every rule so added is subject to §3.6.2: if it resolves to a shell or general-purpose interpreter, the grant response MUST carry the `interpreter_admitted` warning, because a ten-minute grant admitting `bash` is a ten-minute grant admitting everything.
+1. A grant of `allowedCommands` adds named rules for the duration of the grant. Every rule so added is subject to §3.5.2: if it resolves to a shell or general-purpose interpreter, the grant response MUST carry the `rule_never_matches` warning, because a ten-minute grant admitting `bash` is a ten-minute grant admitting everything.
 2. `mode` is not grantable in either direction. Relaxing it — `allowlist` to `denylist`, or either to `unrestricted` — is a change of shape rather than a hole of known shape ([overview.md](./overview.md) §5.1.4). *Tightening* it is not a grant either; that is a policy update.
 3. `allowedUsers` is not grantable because a user identity is the subject of every other rule in this module, not an object it grants access to. Widening it for ten minutes changes who the policy is about.
 4. `maxTimeoutSec` is not grantable because a grant already has a TTL, and a timeout ceiling raised beyond that TTL would outlive the authorization that raised it. A single long-running command asks for a policy update.
@@ -243,52 +254,49 @@ Per [overview.md](./overview.md) §5.1.8, a time-bounded grant against this modu
 
 ## 9. Acceptance criteria
 
-1. **Bypass corpus.** The corpus MUST cover at least the classes below. Each entry MUST resolve to the intended sub-command decomposition and the intended decision, under both `denylist` and `allowlist` mode.
+1. **Rejection corpus.** Every entry below MUST be **rejected** under `allowlist` with `POLICY_EXEC_UNPARSEABLE` and the stated `reason`. The corpus tests that the gate closes, not that a parser is correct — which is the point of §3.3.
 
-   | Class | Corpus entries |
-   | --- | --- |
-   | Shell composition | `curl x \| sh`, `curl x && sh`, `curl x; sh`, `curl x & ` |
-   | Command substitution | `$(curl x)`, `` `curl x` ``, substitution nested in an argument |
-   | Quoting | `"curl" x`, `c"ur"l x`, `'curl' x`, unbalanced quotes |
-   | Executable identity | `curl` vs `/usr/bin/curl`; `./mycurl` as a symlink to `/usr/bin/curl`; an unrelated binary renamed to `curl`; an unresolvable token |
-   | Environment prefix | `env FOO=1 curl x`, `FOO=1 curl x`, `env -i curl x` |
-   | Wrappers | `sudo curl x`, `nohup curl x`, `timeout 5 curl x`, `nice -n 5 curl x`, `xargs curl`, `xargs` with no command |
-   | Option spelling | `--url=x` vs `--url x`; bundled `-sSL` |
-   | Inline script | `sh -c 'curl x'`, `bash -c "$(curl x)"` |
-   | Here-document | `sh <<'EOF' … curl x … EOF` (sub-command) vs `cat <<'EOF' … curl x … EOF` (data) |
-   | Alias / function | `alias c=curl; c x`, `f(){ curl x; }; f` |
-   | Indeterminate | `sh -s < payload`, a wrapper whose target arrives on stdin |
-   | Depth | nesting beyond the §3.5.5 bound |
-   | Argument count | `curl` vs `curl *` |
+   | Class | Corpus entries | `reason` |
+   | --- | --- | --- |
+   | Shell composition | `curl x \| sh`, `curl x && sh`, `curl x; sh`, `curl x &` | `shell_operator` |
+   | Command substitution | `$(curl x)`, `` `curl x` ``, substitution nested in an argument | `command_substitution` |
+   | Redirection | `sh -s < payload`, `cmd > out`, `sh <<'EOF' … EOF` | `redirection` |
+   | Quoting | unbalanced `c"url x` | `unbalanced_quotes` |
+   | Environment prefix | `env FOO=1 curl x`, `FOO=1 curl x`, `env -i curl x` | `wrapper` |
+   | Wrappers | `sudo curl x`, `nohup curl x`, `timeout 5 curl x`, `nice -n 5 curl x`, `xargs curl` | `wrapper` |
+   | Interpreters | `sh -c 'curl x'`, `bash -c "$(curl x)"`, `python -c '…'`, `node -e '…'` | `interpreter` |
+   | Alias / function definition | `alias c=curl; c x`, `f(){ curl x; }; f` | `shell_operator` |
 
-2. `allowlist` mode rejects any execution with an unmatched sub-command, including inside pipelines and substitutions.
+   Two entries MUST **not** be rejected, and they are the corpus's other half: `curl x` and `/usr/bin/curl x` are determinate single invocations and are decided by the rules, not by §3.3.
+
+2. `allowlist` mode rejects any execution whose single resolved invocation matches no rule, and rejects every §3.3 construct before matching is attempted.
 3. Timeout clamp: requested 7200 under ceiling 3600 → runs with `effectiveTimeoutSec: 3600`.
 4. Concurrency cap returns `POLICY_EXEC_CONCURRENCY_LIMIT` with a non-zero `retryAfterSec`.
 5. Unparseable lines are rejected, never executed, and the `reason` is the specific one from §7.
 6. `unrestricted` default with no policy ⇒ behavior identical to today, except the timeout ceiling applies.
 7. Merged `mode` is the most restrictive across sources.
 8. **Identity resolution.** A denylist rule `curl` denies an invocation through a symlink to curl; an allowlist rule `curl` denies an unrelated binary renamed to `curl`; a rule `/usr/bin/curl` and a rule `curl` produce the same decision for an invocation resolving there.
-9. **Option spelling.** A rule written `--url x` matches an invocation `--url=x`, and a rule written `--url=x` matches `--url x`.
-10. **Wrapper extraction.** `env FOO=1 curl x` is denied under a denylist for `curl`; `sudo sh` is denied under an allowlist that does not list `sh`; a wrapper with an indeterminate target is rejected as `indeterminate_wrapper`.
-11. **Interpreter honesty.** An `allowlist` whose rules admit a shell or general-purpose interpreter produces the `interpreter_admitted` warning on create, and the request still succeeds.
+9. **Option spelling is literal.** A rule written `--url x` does **not** match an invocation `--url=x`, and vice versa. This asserts the deliberate removal of argument normalisation (§3.3.5) so it is not reintroduced as a convenience.
+10. **Wrappers do not pass, and naming them does not help.** `sudo curl x` is rejected under an allowlist containing `curl`; it is *still* rejected under an allowlist containing both `curl` and `sudo`, and that allowlist carries the `rule_never_matches` warning for the `sudo` rule (§3.4.3). Under `denylist`, `sudo curl x` is evaluated as `sudo` and admitted if `sudo` is not denied — the completeness asymmetry §3.4.4 states.
+11. **The structural limit is asserted, not just described.** With `mode: allowlist` and `allowedCommands: [make]`, a `make build` invocation is admitted and the `sh` it forks internally is **not** evaluated by this module at all. This is asserted as a test so that §3.5.1 stays visible rather than being rediscovered as a vulnerability report.
 12. `allowedUsers` merged across sources is the intersection, and a request cannot add a user the template did not allow.
 13. **Restricted tier.** `tier: restricted` with no exec fields resolves to `mode: unrestricted` with `audit: metadata`, and the effective policy records those expanded values. `tier: restricted` alone validates successfully — it MUST NOT require an `allowedCommands` list.
-14. **Grants.** A grant adding a named `allowedCommands` rule admits that command until the grant expires and not after; a grant naming `mode`, `allowedUsers`, or a higher `maxTimeoutSec` is rejected with `400 POLICY_GRANT_INVALID`. A grant whose rule resolves to a shell carries the `interpreter_admitted` warning.
+14. **Grants.** A grant adding a named `allowedCommands` rule admits that command until the grant expires and not after; a grant naming `mode`, `allowedUsers`, or a higher `maxTimeoutSec` is rejected with `400 POLICY_GRANT_INVALID`. A grant whose rule resolves to a wrapper or interpreter carries the `rule_never_matches` warning, because such a rule cannot admit anything (§3.4.3).
 
 ## 10. Open questions
 
-1. **Env vars per rule.** `VAR=x cmd` is now decomposed (§3.4.3), so the wrapped command can no longer hide behind an assignment. What remains open is whether `CommandRule` should *constrain* the environment — e.g. forbid `HTTP_PROXY` overrides for network-relevant commands. v1 does not restrict environment values.
+1. **Env vars per rule.** `VAR=x cmd` is rejected outright under `allowlist` (§3.4.2), so nothing can hide behind an assignment there. What remains open is whether `CommandRule` should *constrain* the environment for the modes that do admit such invocations — e.g. forbid `HTTP_PROXY` overrides for network-relevant commands. v1 does not restrict environment values.
 2. **Working directory / path-based rules.** Should rules be able to scope by `cwd` (e.g. "allow `cargo build` only under `/workspace`")?
 3. **Sessions.** Do interactive sessions get per-keystroke evaluation, or is the session established under one evaluation and filesystem/resource left to police it? v1: one evaluation at session start; re-evaluation is an open question.
 4. **Default denylist.** Should the `unrestricted` default still ship a small built-in denylist the way filesystem ships a baseline? The candidates people ask for — `insmod`, `modprobe`, `mount`, host-key tampering — are mostly better answered one layer down: [process.md](./process.md) §4.3 denies `init_module` and friends in its baseline, which holds no matter how the command was spelled or whether it came through the API at all. What a built-in exec denylist would add is a *legible, attributable* denial at the API boundary for the subset of attempts that do arrive through it, which has real operational value and a real surprise cost. The trade-off is now narrower than it was, and answering it requires deciding whether an API denial that a syscall rule already covers is worth the surprise.
-5. **Wrapper set evolution.** The §3.4.2 wrapper set is fixed in v1. It has the same evolution problem as the filesystem baseline set, and SHOULD adopt the same answer: versioned sets rather than silent extension ([filesystem.md](./filesystem.md) §6.2). Note that [process.md](./process.md) §4.3 already commits to versioning for its syscall set, so v1 ships two versioned sets and one unversioned one — that asymmetry is the argument for closing this question rather than carrying it.
+5. **Wrapper and interpreter set evolution.** The §3.4 sets are fixed in v1, and they now decide *rejections* rather than extractions, which raises the stakes: a program missing from the interpreter set is admitted as an ordinary command. It has the same evolution problem as the filesystem baseline set, and SHOULD adopt the same answer: versioned sets rather than silent extension ([filesystem.md](./filesystem.md) §6.2). Note that [process.md](./process.md) §4.3 already commits to versioning for its syscall set, so v1 ships two versioned sets and one unversioned one — that asymmetry is the argument for closing this question rather than carrying it.
 6. **Session re-evaluation and grants.** Question 3 above leaves interactive sessions evaluated once, at session start. A grant (§8.1) that expires mid-session therefore does not re-close the session's command surface, while the same grant against `network` or `process` does re-close, because those enforce per operation. Either sessions gain re-evaluation or this asymmetry is documented as a known limit of session-scoped exec policy.
 
 ## 11. Non-normative notes
 
-- **This module is an optional compliance profile, not part of the mandatory v1 core.** The command-matching rules in §3 — executable identity, argument normalization, wrapper extraction, inline-script parsing — are the most implementation-expensive surface in the proposal, and by §3.6 their security value is bounded to commands submitted through the control interface. For agent-generated code that is usually one interpreter invocation followed by silence. A deployment therefore MAY implement this module as a **control-plane compliance profile** and declare its fields `unsupported` (§8.2 of [overview.md](./overview.md)) without failing conformance for the mandatory core, which is: `process` (non-root, capabilities, syscall surface), `filesystem`, `network`, `identity`, and `resource` — the modules that still bind code the workload started itself.
+- **This module is an optional compliance profile, not part of the mandatory v1 core.** The command-matching rules in §3 — executable identity, argument normalization, wrapper extraction, inline-script parsing — are the most implementation-expensive surface in the proposal, and by §3.5 their security value is bounded to commands submitted through the control interface. For agent-generated code that is usually one interpreter invocation followed by silence. A deployment therefore MAY implement this module as a **control-plane compliance profile** and declare its fields `unsupported` (§8.2 of [overview.md](./overview.md)) without failing conformance for the mandatory core, which is: `process` (non-root, capabilities, syscall surface), `filesystem`, `network`, `identity`, and `resource` — the modules that still bind code the workload started itself.
 
   This is a statement about implementation priority, not a downgrade of the rules below. A deployment that *does* implement this module MUST implement it as specified, including the bypass corpus in §9; a partial command matcher is the approximation [overview.md](./overview.md) §8.2.1 rule 4 forbids, because a pattern language that misses `env FOO=1 curl` is not a narrower version of one that catches it. The choice is whether to implement, not how much.
 - **This is the only fully substrate-independent module.** Every rule here is evaluated in the control plane, before anything is started, so nothing in it depends on a kernel interface, a container runtime, or a CNI ([overview.md](./overview.md) §12.2). Command parsing (§3), user resolution, the timeout clamp, and the concurrency count are all plain server-side logic. A deployment on either substrate declares every field of this module `enforced`, and there is no capability state to negotiate.
-- That property is the flip side of §3.6's honesty. `exec` is easy to implement everywhere precisely because it never has to reach inside a running sandbox — and never reaching inside is exactly why it bounds so little. The modules that are hard to implement portably (`filesystem`'s path rules, `network`'s domain entries) are hard for the same reason they are load-bearing: they enforce below the API, where the substrate's capabilities actually matter.
+- That property is the flip side of §3.5's honesty. `exec` is easy to implement everywhere precisely because it never has to reach inside a running sandbox — and never reaching inside is exactly why it bounds so little. The modules that are hard to implement portably (`filesystem`'s path rules, `network`'s domain entries) are hard for the same reason they are load-bearing: they enforce below the API, where the substrate's capabilities actually matter.
 - One implementation requirement does cross the boundary: §3.2 requires executable resolution to happen **in the sandbox's filesystem view** at evaluation time. On the VM substrate that is a guest-side lookup; on the container substrate it is a lookup in the container's mount namespace. Either way the resolution MUST NOT be performed against the host's view or trusted from the request, which §4.4.4 already states — it is repeated here because it is the one place this module touches the substrate at all.
