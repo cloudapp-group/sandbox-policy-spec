@@ -6,12 +6,13 @@ Part of [Proposal 0001 — Sandbox Security Policy](./overview.md). The key word
 
 ## 1. Scope
 
-This spec defines the filesystem sub-policy of the `SandboxPolicy` object. The sandbox filesystem boundary is two-sided, and so is the policy:
+This spec defines the filesystem sub-policy of the `SandboxPolicy` object: **which paths the sandbox may read, write, or execute**, applied to every process the sandbox runs. There is one subject and one language for it — a path — and that is deliberate.
 
-1. **Host boundary** — which host paths may be mounted into the sandbox, and with what default writability. This formalizes the existing host-mount prefix allowlist as part of the user-facing policy.
-2. **Sandbox boundary** — which paths *inside* the sandbox may be read, written, or executed, applied to every process the sandbox runs.
+An earlier revision of this module also governed the host boundary: which host paths could be mounted in, and with what default writability. Those fields are removed. The reason is that they were never really policy about the sandbox. A host-mount allowlist states *what the platform is willing to expose*, which is an admission decision belonging to the deployment (a Kubernetes admission controller, a VMM configuration), not a capability the sandbox holds. The old §4.4.4 conceded as much by intersecting the policy value with an operator-configured one, which means the policy field could never decide anything on its own.
 
-Out of scope: content inspection, quotas on file count/size (covered by resource limits for bytes written), and image-layer construction. Also out of scope: detecting anomalous file access, which is an audit-stream concern rather than a policy field ([overview.md](./overview.md) §2.3.1).
+Nothing is lost in expressiveness. A mount that should be read-only is `readOnlyPaths: [/mnt/data]`; a mount that should be unreadable is `denyPaths`. Once mounted, a path is a path, and this module no longer cares where it came from — which removes the second, parallel grammar that §2.2 of [overview.md](./overview.md) exists to prevent.
+
+Out of scope: content inspection, quotas on file count/size (covered by resource limits for bytes written), image-layer construction, and **which host paths may be mounted at all**. Also out of scope: detecting anomalous file access, which is an audit-stream concern rather than a policy field ([overview.md](./overview.md) §2.3.1).
 
 Two adjacent surfaces belong to [process.md](./process.md) and are named here because policies that need one usually need the other. Whether a process may *gain privilege* is `process.noNewPrivileges`, not a path rule — a `setuid` binary under a readable path is still a privilege gain. Whether a process may *persist* is only partly `process.allowDaemonize`: autostart persistence is written to files (`crontab`, systemd units, shell profiles, XDG autostart), so blocking it is a `denyPaths`/`readOnlyPaths` decision made here ([process.md](./process.md) §3.4).
 
@@ -29,9 +30,6 @@ policy:
     implicitRuntimeWritable: bool              # default: true
     onViolation:     deny | kill               # default: deny
     audit:           none | metadata           # default: none
-    mounts:
-      allowedHostPrefixes: [string]            # host paths that may be mounted
-      defaultReadOnly:     bool                # default: false
 ```
 
 ## 3. Path pattern syntax
@@ -76,14 +74,7 @@ For any filesystem access by any sandbox process, the decision MUST be:
 3. `denyPaths` MUST deny reads even for the owning user identity inside the sandbox.
 4. Effects apply to newly created processes from policy application onward. Whether a policy update can re-apply to already-running processes is an open question (§10).
 
-### 4.4 Host boundary semantics
-
-1. A mount request whose host path does not fall under any `mounts.allowedHostPrefixes` entry MUST be rejected at create time with `400 POLICY_FS_MOUNT_FORBIDDEN`.
-2. `mounts.defaultReadOnly: true` means mounts that do not explicitly request read-write are mounted read-only.
-3. Prefix validation MUST resolve `..` before matching (path-traversal attempts rejected).
-4. The cluster-side operator allowlist remains as a **bounding constraint**: the effective `allowedHostPrefixes` MUST be the intersection of policy-declared prefixes and operator-configured prefixes. Policy cannot widen what the operator forbids.
-
-### 4.5 Violation actions
+### 4.4 Violation actions
 
 Per [overview.md](./overview.md) §8.1, `onViolation` decides what happens when §4.2 refuses an access:
 
@@ -95,7 +86,7 @@ Per [overview.md](./overview.md) §8.1, `onViolation` decides what happens when 
 1. `kill` is the right choice for a deployment that treats a touch of a credential path as disqualifying rather than as a recoverable error: a process that tried to read `~/.aws/credentials` has already told the operator what it is doing, and letting it continue only gives it more attempts.
 2. `deny` remains the default because a great many benign programs probe paths they do not need — configuration lookups walk a list of candidate locations, and a build tool may stat directories that do not concern it. Under `kill` those probes become process deaths, which is why the aggressive value is opt-in.
 3. There is no `warn`, on the terms of [overview.md](./overview.md) §8.1.2. To learn what a stricter path set *would* refuse without refusing it, use `auditTier` (§6.6) — which, unlike a `warn`, keeps the current rules enforced.
-4. `onViolation` applies to the baseline deny set and to explicitly declared rules alike. It does not apply to the host-boundary check in §4.4, which is a create-time rejection with no process to act on.
+4. `onViolation` applies to the baseline deny set and to explicitly declared rules alike. Every rule in this module is evaluated on a filesystem access by a running process, so there is no create-time rejection for it to be inapplicable to.
 5. Either action emits a violation event, at every audit level (§9).
 
 ## 5. Field specification and constraints
@@ -109,10 +100,8 @@ Per [overview.md](./overview.md) §8.1, `onViolation` decides what happens when 
 | `readOnlyPaths` | `[string]?` | Pattern syntax §3. MUST be empty when `writableRoots` is non-empty. | `[]` | Reads allowed; writes/create/delete denied. |
 | `writableRoots` | `[string]?` | Pattern syntax §3. MUST be empty when `readOnlyPaths` is non-empty. | `[]` | When non-empty, writes allowed only under these roots (plus §6.4). |
 | `implicitRuntimeWritable` | `bool?` | — | `true` | Whether the runtime-writable set applies when `writableRoots` is non-empty (§6.4). |
-| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.5. |
+| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.4. |
 | `audit` | `enum?` | `none` \| `metadata` | `none` | Audit level for **ordinary** filesystem activity (§9). It does not suppress violation events ([overview.md](./overview.md) §8.1.4). |
-| `mounts.allowedHostPrefixes` | `[string]?` | Absolute host paths, no wildcards. | operator config | Which host paths may be mounted into this sandbox. |
-| `mounts.defaultReadOnly` | `bool?` | — | `false` | Default writability of mounts without explicit mode. |
 
 Violating the `readOnlyPaths`/`writableRoots` mutual exclusion MUST fail with `400 INVALID_POLICY` naming both fields.
 
@@ -187,23 +176,26 @@ Which defaults apply is selected by `policy.tier` ([overview.md](./overview.md) 
 | --- | --- | --- |
 | `mode` | `baseline` | `baseline` |
 | `baselineVersion` | platform default | platform default |
-| `mounts.defaultReadOnly` | `false` | `true` |
 | `onViolation` | `deny` | `deny` |
 | `audit` | `none` | `metadata` |
 
 Note that `baseline` and `restricted` share `mode: baseline`. That is deliberate and is one of only two places in the proposal where a module's `baseline` tier is not byte-for-byte today's behavior ([overview.md](./overview.md) §9): the sensitive-path deny set is on at the default tier, because a credential path a legitimate workload never reads is not a compatibility surface worth preserving. A deployment that disagrees pins `baselineExceptions` or sets `mode: unrestricted`, both of which are recorded and audited (§6.3.4).
 
-`onViolation` is `deny` under both tiers, per [overview.md](./overview.md) §8.1.7 — and here the reason is especially concrete: benign path probing is common enough (§4.5.2) that a tier which selected `kill` would turn ordinary configuration lookups into process deaths.
+`onViolation` is `deny` under both tiers, per [overview.md](./overview.md) §8.1.7 — and here the reason is especially concrete: benign path probing is common enough (§4.4.2) that a tier which selected `kill` would turn ordinary configuration lookups into process deaths.
 
-`tier: restricted` changes one field: mounts arrive read-only unless the mount request asks for write. It does not narrow the in-sandbox path rules, because there is no useful guess to make — a restricted tier that turned on `writableRoots` would have to invent the root, and inventing `/workspace` for an image that builds in `/src` is the confusing-build-failure outcome §6.4 exists to avoid.
+**`tier: restricted` changes exactly one field here — `audit` — and after the removal of the mount fields (§1) that is the only difference between the two tiers in this module.** This is stated rather than left to be noticed, because a reader who watches four other modules tighten under `restricted` is entitled to know that the path rules do not.
+
+The reason is the one §6.4 already gives: there is no useful guess to make. A tier that turned on `writableRoots` would have to invent the root, and inventing `/workspace` for an image that builds in `/src` produces exactly the confusing build failure this module works to avoid. What `restricted` supplies without guessing is the audit trail, so that is what it supplies — the same restraint `exec` is given for the same reason ([overview.md](./overview.md) §7.1).
+
+What does the tightening in this module is therefore not the tier but the baseline set, which is on under **every** tier including `compatibility`. That is the deliberate exception recorded above, and it is where the module's protection actually comes from.
 
 ### 6.6 Shadow evaluation support
 
-Per [overview.md](./overview.md) §7.2.5, this module supports shadow evaluation under `auditTier` for its full path surface: `mode`, the resolved baseline set, `denyPaths`, `readOnlyPaths`, `writableRoots`, and `mounts.defaultReadOnly`. An access the shadow configuration would have refused **succeeds** and emits a `shadow: true` audit event carrying the path, the operation, and the shadow rule that would have refused it.
+Per [overview.md](./overview.md) §7.2.5, this module supports shadow evaluation under `auditTier` for its full path surface: `mode`, the resolved baseline set, `denyPaths`, `readOnlyPaths`, and `writableRoots`. An access the shadow configuration would have refused **succeeds** and emits a `shadow: true` audit event carrying the path, the operation, and the shadow rule that would have refused it.
 
 The path surface has a volume problem the other modules do not, and it has to be handled rather than noted. A build that walks a tree touches the same directories thousands of times, so a shadow finding emitted per access would bury the finding that matters. Implementations **SHOULD** therefore aggregate shadow findings by `{rule, operation}` and report the distinct paths involved up to a bounded count, rather than emitting one event per access ([overview.md](./overview.md) §7.2.7).
 
-One asymmetry is worth stating, because it limits what a shadow report can promise here. A denied *read* is usually recoverable — the workload gets `EACCES` and fails visibly. A denied *write* may leave the workload in a state it cannot report, and a shadow evaluation cannot tell the difference: it observes the access, not the consequence. A clean shadow report therefore means "nothing would have been refused", not "the stricter policy is safe to adopt". For `mounts.defaultReadOnly` in particular, read the report as a list of write locations to declare, not as a verdict.
+One asymmetry is worth stating, because it limits what a shadow report can promise here. A denied *read* is usually recoverable — the workload gets `EACCES` and fails visibly. A denied *write* may leave the workload in a state it cannot report, and a shadow evaluation cannot tell the difference: it observes the access, not the consequence. A clean shadow report therefore means "nothing would have been refused", not "the stricter policy is safe to adopt". Where the findings concern writes, read the report as a list of write locations to declare, not as a verdict.
 
 ## 7. Merge semantics
 
@@ -219,8 +211,6 @@ On top of [overview.md](./overview.md) §5:
 | `implicitRuntimeWritable` | `false` wins (most restrictive). |
 | `onViolation` | `kill` wins ([overview.md](./overview.md) §8.1.7). |
 | `audit` | Most detailed wins (`metadata` > `none`). |
-| `mounts.allowedHostPrefixes` | Intersection across sources (mount surface can only narrow, never widen). |
-| `mounts.defaultReadOnly` | `true` wins (most restrictive). |
 
 ### 7.1 Grantable fields
 
@@ -231,15 +221,14 @@ Per [overview.md](./overview.md) §5.1.8, a time-bounded grant against this modu
 | `baselineExceptions` — named baseline paths | `mode: unrestricted` |
 | `writableRoots` — named roots | `denyPaths` removal of any entry |
 | `readOnlyPaths` — removal of a named entry | `implicitRuntimeWritable` |
-| | `mounts.allowedHostPrefixes` |
 
-Two exclusions carry the weight. `denyPaths` is not grantable because an explicit deny is the one statement in this module whose author meant it literally; `baselineExceptions` already covers "one built-in path, temporarily", and it covers it with the audit trail of §6.3.4. `mounts.allowedHostPrefixes` is not grantable because the host boundary is bounded by operator configuration (§4.4.4), so a grant could not widen it in the first place — saying so is cheaper than letting someone discover it by trying.
+One exclusion carries the weight. `denyPaths` is not grantable because an explicit deny is the one statement in this module whose author meant it literally; `baselineExceptions` already covers "one built-in path, temporarily", and it covers it with the audit trail of §6.3.4.
 
 A grant of `writableRoots` when `writableRoots` was empty is a **narrowing**, not a widening: it switches the module from "writes allowed by default" to "writes allowed only here". A grant MUST NOT have that effect ([overview.md](./overview.md) §5.1.4 — a grant opens a hole of known shape, it does not change the shape of the policy). Such a request MUST be rejected with `400 POLICY_GRANT_INVALID`.
 
 ## 8. Errors
 
-Configuration errors (create/update time): `400 INVALID_POLICY` (malformed pattern, mutual exclusion violated, unknown `baselineVersion`, `baselineExceptions` entry not present in the pinned baseline set), `400 POLICY_FS_MOUNT_FORBIDDEN` (host path outside allowlist), `400 POLICY_GRANT_INVALID` (a grant targeting a non-grantable field, or a `writableRoots` grant against an empty `writableRoots`, §7.1).
+Configuration errors (create/update time): `400 INVALID_POLICY` (malformed pattern, mutual exclusion violated, unknown `baselineVersion`, `baselineExceptions` entry not present in the pinned baseline set), `400 POLICY_GRANT_INVALID` (a grant targeting a non-grantable field, or a `writableRoots` grant against an empty `writableRoots`, §7.1).
 
 Enforcement errors are OS-level, not API-level, because the policy applies below the API surface:
 
@@ -250,7 +239,7 @@ Enforcement errors are OS-level, not API-level, because the policy applies below
 | Create/delete/rename under read-only | `EACCES` |
 | Directory listing of a denied directory | `EACCES` |
 
-Under `onViolation: kill` (§4.5) the offending process is terminated instead of receiving any of the above.
+Under `onViolation: kill` (§4.4) the offending process is terminated instead of receiving any of the above.
 
 Denials MUST NOT be distinguishable from ordinary permission failures in a way that leaks the rule identity to the sandbox process (no error-channel oracle); rule identity appears only in the audit stream (§9). `kill` does not breach this — a terminated process learns nothing — and the residual sibling-process signal is the accepted trade recorded in [overview.md](./overview.md) §8.1.5.
 
@@ -285,5 +274,5 @@ Denials MUST NOT be distinguishable from ordinary permission failures in a way t
   | Neither available | — | `unsupported` |
 
   The last row is the one that has to be handled honestly. A read-only bind mount is **not** an implementation of `denyPaths`: it changes writability, not visibility, so a credential file stays readable — which is the entire threat this module exists to answer ([overview.md](./overview.md) §2.3). Nor is it partial enforcement, since it does not narrow the specified rule, it substitutes a different one. §8.2.1 rule 4 requires such a deployment to declare the field `unsupported` and let `enforcement: strict` reject policies that name it.
-- The `writableRoots` direction is the more portable half of this module. Expressing "writes only under these roots" maps onto mount-level read-only defaults far more closely than `denyPaths` maps onto anything, so a deployment whose path-rule interface is absent may still find `mounts.defaultReadOnly` and `writableRoots` reach `enforced` while `denyPaths` and `readOnlyPaths` do not. Capability declarations are per field for exactly this reason.
-- The host-boundary rules formalize existing behavior (prefix allowlist + read-only remount) without changing it. They are also substrate-independent: `mounts.allowedHostPrefixes` is a create-time check on the mount request, so it needs no in-sandbox mechanism at all.
+- The `writableRoots` direction is the more portable half of this module. "Writes only under these roots" is expressible with a read-only root filesystem plus targeted writable mounts, which most runtimes offer directly, whereas `denyPaths` needs a real path-rule interface — so a deployment may well reach `enforced` on `writableRoots` while `denyPaths` and `readOnlyPaths` stay `unsupported`. Capability declarations are per field for exactly this reason.
+- Removing the host-mount fields (§1) does not remove the host boundary; it relocates the statement of it. A deployment still constrains which host paths may be mounted, through whichever admission or VMM mechanism it already uses. What changed is that the sandbox policy no longer claims to be that constraint while being silently bounded by it.

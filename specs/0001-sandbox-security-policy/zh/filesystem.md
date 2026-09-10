@@ -6,12 +6,13 @@
 
 ## 1. 范围
 
-本规格定义 `SandboxPolicy` 对象的文件系统子策略。沙箱文件系统边界是两层的，策略也是两层的：
+本规格定义 `SandboxPolicy` 对象的文件系统子策略：**沙箱可以读、写、执行哪些路径**，作用于沙箱运行的每一个进程。只有一个主体、一种语言来表达它 —— 路径 —— 这是刻意的。
 
-1. **宿主边界** — 哪些宿主路径可以挂载进沙箱、默认可写性如何。这把既有的宿主挂载前缀白名单形式化为面向用户的策略。
-2. **沙箱边界** — 沙箱**内部**哪些路径可读、可写、可执行，作用于沙箱运行的每一个进程。
+本模块的一个早期版本还管辖宿主边界：哪些宿主路径可以挂载进来、默认可写性如何。那些字段被移除了。理由是它们从来就不真的是关于沙箱的策略。一个宿主挂载白名单陈述的是*平台愿意暴露什么*，那是一个属于部署的准入决定（一个 Kubernetes admission controller、一份 VMM 配置），不是沙箱持有的一项能力。旧的 §4.4.4 也承认了这一点 —— 它把策略值与一个运维配置值取交集，这意味着那个策略字段永远无法独自决定任何事。
 
-不在范围内：内容审查、文件数量/大小配额（写入字节量由资源限额覆盖）、镜像层构建。同样不在范围内：识别异常文件访问 —— 那是审计流的关切，而不是一个策略字段（[overview.md](./overview.md) §2.3.1）。
+表达力没有任何损失。一个应当只读的挂载是 `readOnlyPaths: [/mnt/data]`；一个应当不可读的挂载是 `denyPaths`。一旦挂载，路径就是路径，本模块不再关心它从哪来 —— 这移除了 [overview.md](./overview.md) §2.2 存在所要防止的那第二套并行语法。
+
+不在范围内：内容审查、文件数量/大小配额（写入字节量由资源限额覆盖）、镜像层构建，以及**哪些宿主路径可以被挂载**。同样不在范围内：识别异常文件访问 —— 那是审计流的关切，而不是一个策略字段（[overview.md](./overview.md) §2.3.1）。
 
 有两个相邻的面归 [process.md](./process.md) 管，在此点名，因为需要其中一个的策略通常也需要另一个。进程能否*提权*是 `process.noNewPrivileges`，不是一条路径规则 —— 一个位于可读路径下的 `setuid` 二进制，提权照样发生。进程能否*持久化*只有一部分是 `process.allowDaemonize`：自启型持久化是写在文件里的（`crontab`、systemd unit、shell profile、XDG autostart），所以阻止它是在本文档中由 `denyPaths`/`readOnlyPaths` 做出的决定（[process.md](./process.md) §3.4）。
 
@@ -29,9 +30,6 @@ policy:
     implicitRuntimeWritable: bool              # 默认: true
     onViolation:     deny | kill               # 默认: deny
     audit:           none | metadata           # 默认: none
-    mounts:
-      allowedHostPrefixes: [string]            # 可挂载的宿主路径
-      defaultReadOnly:     bool                # 默认: false
 ```
 
 ## 3. 路径模式语法
@@ -76,14 +74,7 @@ policy:
 3. `denyPaths` **必须**对沙箱内的属主用户身份也拒绝读取。
 4. 效果自策略应用起对新建进程生效。策略更新能否重新作用于已运行进程是开放问题（§10）。
 
-### 4.4 宿主边界语义
-
-1. 宿主路径不在任何 `mounts.allowedHostPrefixes` 条目之下的挂载请求**必须**在创建时以 `400 POLICY_FS_MOUNT_FORBIDDEN` 拒绝。
-2. `mounts.defaultReadOnly: true` 表示未显式请求读写的挂载按只读挂载。
-3. 前缀校验**必须**在匹配前解析 `..`（路径穿越尝试被拒绝）。
-4. 集群侧运维白名单仍是**兜底约束**：生效的 `allowedHostPrefixes` **必须**是策略声明前缀与运维配置前缀的交集。策略不能放宽运维所禁止的范围。
-
-### 4.5 违规动作
+### 4.4 违规动作
 
 依 [overview.md](./overview.md) §8.1，`onViolation` 决定当 §4.2 拒绝一次访问时会发生什么：
 
@@ -95,7 +86,7 @@ policy:
 1. 对于那种把"碰一下凭据路径"视为直接取消资格、而非一个可恢复错误的部署，`kill` 是对的选择：一个试图读 `~/.aws/credentials` 的进程已经把自己在做什么告诉运维了，而让它继续跑只是多给它几次机会。
 2. `deny` 仍是默认值，因为大量无恶意的程序会去探测自己并不需要的路径 —— 配置查找会遍历一串候选位置，而一个构建工具可能会 stat 一些与它无关的目录。在 `kill` 之下这些探测会变成进程死亡，这正是那个更激进的取值要由用户主动选择的原因。
 3. 没有 `warn`，理由见 [overview.md](./overview.md) §8.1.2。要在不拒绝的前提下弄清一套更严的路径集*本来会*拒绝什么，用 `auditTier`（§6.6）—— 与 `warn` 不同，它让当前规则保持强制。
-4. `onViolation` 对基线拒绝集合与显式声明的规则同等适用。它不适用于 §4.4 的宿主边界检查，那是一次创建时拒绝，没有进程可供施加动作。
+4. `onViolation` 对基线拒绝集合与显式声明的规则同等适用。本模块的每条规则都是在一个运行进程的文件系统访问上求值的，因此不存在一次创建时拒绝供它去不适用。
 5. 两种动作都会产生违规事件，且在任何审计级别下都产生（§9）。
 
 ## 5. 字段规格与约束
@@ -109,10 +100,8 @@ policy:
 | `readOnlyPaths` | `[string]?` | 模式语法 §3。`writableRoots` 非空时**必须**为空。 | `[]` | 允许读；写/创建/删除被拒绝。 |
 | `writableRoots` | `[string]?` | 模式语法 §3。`readOnlyPaths` 非空时**必须**为空。 | `[]` | 非空时，仅这些根之下允许写（加 §6.4）。 |
 | `implicitRuntimeWritable` | `bool?` | — | `true` | `writableRoots` 非空时运行时可写集合是否生效（§6.4）。 |
-| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.5。 |
+| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.4。 |
 | `audit` | `enum?` | `none` \| `metadata` | `none` | **普通**文件系统活动的审计级别（§9）。它不压制违规事件（[overview.md](./overview.md) §8.1.4）。 |
-| `mounts.allowedHostPrefixes` | `[string]?` | 宿主绝对路径，不允许通配。 | 运维配置 | 哪些宿主路径可挂载进该沙箱。 |
-| `mounts.defaultReadOnly` | `bool?` | — | `false` | 未显式指定模式的挂载的默认可写性。 |
 
 违反 `readOnlyPaths`/`writableRoots` 互斥约束**必须**以 `400 INVALID_POLICY` 失败，并同时指名两个字段。
 
@@ -187,23 +176,26 @@ denyPaths:
 | --- | --- | --- |
 | `mode` | `baseline` | `baseline` |
 | `baselineVersion` | 平台默认值 | 平台默认值 |
-| `mounts.defaultReadOnly` | `false` | `true` |
 | `onViolation` | `deny` | `deny` |
 | `audit` | `none` | `metadata` |
 
 注意 `baseline` 与 `restricted` 共用 `mode: baseline`。这是刻意的，也是整份提案中仅有两处「某模块的 `baseline` 分级并非逐字节等于今天行为」的地方之一（[overview.md](./overview.md) §9）：敏感路径拒绝集在默认分级下就是开着的，因为一条正当工作负载从不读取的凭据路径，不是一个值得保留的兼容性面。不同意的部署可以固定 `baselineExceptions` 或设置 `mode: unrestricted`，两者都会被记录并审计（§6.3.4）。
 
-`onViolation` 在两个分级下都是 `deny`，依 [overview.md](./overview.md) §8.1.7 —— 而在这里理由格外具体：无恶意的路径探测足够常见（§4.5.2），一个选了 `kill` 的分级会把普通的配置查找变成进程死亡。
+`onViolation` 在两个分级下都是 `deny`，依 [overview.md](./overview.md) §8.1.7 —— 而在这里理由格外具体：无恶意的路径探测足够常见（§4.4.2），一个选了 `kill` 的分级会把普通的配置查找变成进程死亡。
 
-`tier: restricted` 只改一个字段：挂载除非明确请求写，否则以只读到达。它**不**收窄沙箱内的路径规则，因为没有任何有用的猜测可做 —— 一个打开 `writableRoots` 的受限分级不得不发明出那个根，而为一个在 `/src` 里构建的镜像发明 `/workspace`，正是 §6.4 存在所要避免的那种令人困惑的构建失败。
+**`tier: restricted` 在这里只改一个字段 —— `audit` —— 而在移除挂载字段（§1）之后，那是本模块中两个分级之间唯一的差别。** 这被写出来而不是留给人去注意到，因为一个看着另外四个模块在 `restricted` 下收紧的读者，有权知道路径规则不收紧。
+
+理由是 §6.4 已给出的那个：没有任何有用的猜测可做。一个打开 `writableRoots` 的分级不得不发明出那个根，而为一个在 `/src` 里构建的镜像发明 `/workspace`，正是本模块要避免的那种令人困惑的构建失败。`restricted` 在不猜的前提下能提供的是审计轨迹，所以它提供的就是审计轨迹 —— 与 `exec` 出于同样理由被给予的同一份克制（[overview.md](./overview.md) §7.1）。
+
+因此在本模块中做收紧的不是分级而是基线集合，它在**每个**分级下（包括 `compatibility`）都开着。那是上面记录的那处刻意例外，也是本模块的保护真正来自的地方。
 
 ### 6.6 影子评估支持
 
-依 [overview.md](./overview.md) §7.2.5，本模块在 `auditTier` 之下对其完整的路径面支持影子评估：`mode`、解析出的基线集合、`denyPaths`、`readOnlyPaths`、`writableRoots` 与 `mounts.defaultReadOnly`。影子配置本来会拒绝的访问**照常成功**，并产生一条 `shadow: true` 审计事件，携带该路径、该操作，以及本来会拒绝它的那条影子规则。
+依 [overview.md](./overview.md) §7.2.5，本模块在 `auditTier` 之下对其完整的路径面支持影子评估：`mode`、解析出的基线集合、`denyPaths`、`readOnlyPaths` 与 `writableRoots`。影子配置本来会拒绝的访问**照常成功**，并产生一条 `shadow: true` 审计事件，携带该路径、该操作，以及本来会拒绝它的那条影子规则。
 
 路径面有一个其他模块没有的事件量问题，而它必须被处理，而不只是被提一句。一次遍历目录树的构建会成千上万次地触碰同一批目录，因此按访问逐条产生影子发现会把真正重要的那条发现埋掉。因此实现**应该**按 `{rule, operation}` 聚合影子发现，并在一个有界的条数内报告涉及的不同路径，而不是每次访问发一条事件（[overview.md](./overview.md) §7.2.7）。
 
-有一处不对称值得说明，因为它限定了一份影子报告在这里能承诺什么。被拒绝的*读*通常是可恢复的 —— 工作负载拿到 `EACCES` 并可见地失败。被拒绝的*写*可能让工作负载处在一个它无法上报的状态里，而影子评估分不清这两者：它观察的是访问，而不是后果。因此一份干净的影子报告意味着"本来不会有任何东西被拒绝"，而不是"这份更严的策略可以安全采纳"。特别是对 `mounts.defaultReadOnly`，请把报告读作一份需要声明的写入位置清单，而不是一个判决。
+有一处不对称值得说明，因为它限定了一份影子报告在这里能承诺什么。被拒绝的*读*通常是可恢复的 —— 工作负载拿到 `EACCES` 并可见地失败。被拒绝的*写*可能让工作负载处在一个它无法上报的状态里，而影子评估分不清这两者：它观察的是访问，而不是后果。因此一份干净的影子报告意味着"本来不会有任何东西被拒绝"，而不是"这份更严的策略可以安全采纳"。凡发现涉及写入时，请把报告读作一份需要声明的写入位置清单，而不是一个判决。
 
 ## 7. 合并语义
 
@@ -219,8 +211,6 @@ denyPaths:
 | `implicitRuntimeWritable` | `false` 胜（最严格）。 |
 | `onViolation` | `kill` 胜出（[overview.md](./overview.md) §8.1.7）。 |
 | `audit` | 更详细者胜出（`metadata` > `none`）。 |
-| `mounts.allowedHostPrefixes` | 各来源取交集（挂载面只能收窄，不能放宽）。 |
-| `mounts.defaultReadOnly` | `true` 胜（最严格）。 |
 
 ### 7.1 可授权字段
 
@@ -231,15 +221,14 @@ denyPaths:
 | `baselineExceptions` —— 具名的基线路径 | `mode: unrestricted` |
 | `writableRoots` —— 具名的根 | 移除任何 `denyPaths` 条目 |
 | `readOnlyPaths` —— 移除某个具名条目 | `implicitRuntimeWritable` |
-| | `mounts.allowedHostPrefixes` |
 
-两处排除承载了主要分量。`denyPaths` 不可授权，因为在本模块里，显式拒绝是作者字面意思就是如此的那一条陈述；「临时打开某一条内置路径」已经由 `baselineExceptions` 覆盖，而且它带着 §6.3.4 的审计轨迹。`mounts.allowedHostPrefixes` 不可授权，因为宿主边界受运维配置兜底（§4.4.4），授权本来就放宽不了它 —— 把这一点说出来，比让人靠试出来更省事。
+一处排除承载了主要分量。`denyPaths` 不可授权，因为在本模块里，显式拒绝是作者字 面意思就是如此的那一条陈述；「临时打开某一条内置路径」已经由 `baselineExceptions` 覆盖，而且它带着 §6.3.4 的审计轨迹。
 
 在 `writableRoots` 原本为空时对它授权，是一次**收窄**而不是放宽：它把本模块从「默认允许写」切换成「只有这里允许写」。授权**不得**产生这种效果（[overview.md](./overview.md) §5.1.4 —— 授权打开一个形状已知的洞，它不改变策略的形状）。这类请求**必须**以 `400 POLICY_GRANT_INVALID` 拒绝。
 
 ## 8. 错误
 
-配置错误（创建/更新时）：`400 INVALID_POLICY`（模式格式错误、违反互斥约束、未知的 `baselineVersion`、`baselineExceptions` 条目不在所固定的基线集合中）、`400 POLICY_FS_MOUNT_FORBIDDEN`（宿主路径超出白名单）、`400 POLICY_GRANT_INVALID`（授权指向不可授权字段，或在 `writableRoots` 为空时对其授权，§7.1）。
+配置错误（创建/更新时）：`400 INVALID_POLICY`（模式格式错误、违反互斥约束、未知的 `baselineVersion`、`baselineExceptions` 条目不在所固定的基线集合中）、`400 POLICY_GRANT_INVALID`（授权指向不可授权字段，或在 `writableRoots` 为空时对其授权，§7.1）。
 
 强制执行错误是 OS 层的，不是 API 层的，因为策略作用于 API 表面之下：
 
@@ -250,7 +239,7 @@ denyPaths:
 | 在只读之下创建/删除/重命名 | `EACCES` |
 | 列出被拒目录 | `EACCES` |
 
-在 `onViolation: kill`（§4.5）之下，那个违规进程被终止，而不会收到上表中的任何一项。
+在 `onViolation: kill`（§4.4）之下，那个违规进程被终止，而不会收到上表中的任何一项。
 
 拒绝**不得**以某种可区别于普通权限失败的方式向沙箱进程泄露规则身份（不得存在错误侧信道）；规则身份只出现在审计流（§9）中。`kill` 不违反这一条 —— 一个被终止的进程什么也学不到 —— 而留给兄弟进程的那点残余信号，是 [overview.md](./overview.md) §8.1.5 记录下的、被接受的取舍。
 
@@ -285,5 +274,5 @@ denyPaths:
   | 两者都不可用 | — | `unsupported` |
 
   最后一行才是必须被诚实处理的那一行。只读 bind mount **不是** `denyPaths` 的一种实现：它改变的是可写性、不是可见性，所以一个凭据文件仍然可读 —— 而那正是本模块存在所要回答的全部威胁（[overview.md](./overview.md) §2.3）。它也不是部分强制，因为它并没有收窄那条被规定的规则，而是替换成了另一条。§8.2.1 规则 4 要求这样的部署把该字段声明为 `unsupported`，并让 `enforcement: strict` 去拒绝指名了它的策略。
-- `writableRoots` 那个方向是本模块中更可移植的那一半。表达"仅这些根之下可写"与挂载级只读默认值的贴合程度，远高于 `denyPaths` 与任何东西的贴合程度，因此一个缺少路径规则接口的部署仍可能让 `mounts.defaultReadOnly` 与 `writableRoots` 达到 `enforced`，而 `denyPaths` 与 `readOnlyPaths` 达不到。能力声明之所以按字段进行，正是为了这个。
-- 宿主边界规则将既有行为（前缀白名单 + 只读重挂载）形式化，行为不变。它们同样与基质无关：`mounts.allowedHostPrefixes` 是对挂载请求的创建时检查，因此它完全不需要任何沙箱内机制。
+- `writableRoots` 那个方向是本模块中更可移植的那一半。"仅这些根之下可写"可以用一个只读根文件系统加上有针对性的可写挂载来表达，多数运行时直接提供这个，而 `denyPaths` 需要一个真正的路径规则接口 —— 因此一个部署很可能在 `writableRoots` 上达到 `enforced`，而 `denyPaths` 与 `readOnlyPaths` 停在 `unsupported`。能力声明之所以按字段进行，正是为了这个。
+- 移除宿主挂载字段（§1）并不移除宿主边界，而是把对它的陈述换了地方。一个部署仍然通过它已经在用的那套准入或 VMM 机制，约束哪些宿主路径可以挂载。变的是：沙箱策略不再一边声称自己就是那条约束、一边又被它静默兜底。
