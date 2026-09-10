@@ -53,7 +53,7 @@ policy:
 - name:        string        # 必填，在其列表内唯一；用于错误与审计
   secretRef:   string        # 必填；由平台解析的不透明引用
   exposure:    proxy | file | env | none   # 默认：identity.defaultExposure
-  destinations: [string]     # exposure: proxy 时必填 —— 用 allowOut 语法
+  destinations: [string]     # exposure: proxy 时必填 —— 用 network Peer 语法
   methods:     [string]      # 可选；HTTP 方法的子集
   pathPrefixes: [string]     # 可选；请求路径前缀
   ttlSec:      int           # 默认：900
@@ -91,10 +91,10 @@ policy:
 
 一个 `proxy` 之下的凭据只在绑定所说的地方可用。没有这一条，`proxy` 只是把秘密换了个位置 —— 工作负载读不到它，却仍然能把它花到任何地方。
 
-1. `destinations` 在 `exposure: proxy` 之下**必填**且**必须**非空。它使用 `allowOut` 的目标语法（[network.md](./network.md) §2.1）：地址、CIDR、DNS 名称与前导 `*.` 通配。`proxy` 之下为空或缺省的 `destinations` **必须**以 `400 INVALID_POLICY` 拒绝；一个可被附加到任意目的地的凭据，是一个套着作用域字段名的无作用域凭据。
+1. `destinations` 在 `exposure: proxy` 之下**必填**且**必须**非空。它使用 [network.md](./network.md) §2.3 的 `Peer` 语法：地址、CIDR、DNS 名称与前导 `*.` 通配。`proxy` 之下为空或缺省的 `destinations` **必须**以 `400 INVALID_POLICY` 拒绝；一个可被附加到任意目的地的凭据，是一个套着作用域字段名的无作用域凭据。
 2. 平台**必须**仅把凭据附加到那些目的地匹配、方法在 `methods`（若已设）之内、且请求路径以 `pathPrefixes`（若已设）之一开头的请求上。一个不匹配的请求**必须**在**不带**凭据的情况下被转发，而不是被拒绝 —— 工作负载有权发起未认证请求，而拒绝它们会让本模块变成第二份网络策略。
 3. 目的地匹配**必须**在**解析后的连接目标**上进行，而不是在一个由工作负载控制的请求头上进行。一个连到别的地址、却带着指名某个被允许目的地的 `Host` 头的连接，**不得**得到该凭据。这与 [exec.md](./exec.md) §3.2 对可执行文件解析所提的是同一条要求，理由也相同。
-4. `destinations` 不放宽 `network`。一个在此被许可、却被 `network` 拒绝的目的地仍然不可达；两个模块取交集。一条其目的地在生效网络策略之下全部不可达的绑定，**必须**作为 `policyWarnings` 条目 `{field: "policy.identity.secrets", name, reason: "destinations_unreachable"}` 上报 —— 一个以为某个凭据正在被使用、而其实没有任何东西能抵达其目的地的作者，应该在创建时就知道这件事。
+4. `destinations` 不放宽 `network`。一个在此被许可、却被 `network` 拒绝的目的地仍然不可达；两个模块取交集。反过来也成立、且值得写明：`network.internal.mode: allow` 使云元数据端点可达，而从它取得的凭据是本模块从未签发、也无法吊销的（[network.md](./network.md) §2.2.3）。因此一份把该设置与一个 `proxy` 绑定配对的策略携带 `metadata_endpoint_reachable` 警告，因为 §3.1 的保证只对本模块所控制的凭据成立。一条其目的地在生效网络策略之下全部不可达的绑定，**必须**作为 `policyWarnings` 条目 `{field: "policy.identity.secrets", name, reason: "destinations_unreachable"}` 上报 —— 一个以为某个凭据正在被使用、而其实没有任何东西能抵达其目的地的作者，应该在创建时就知道这件事。
 5. 当一个凭据是短期的、且由平台签发时（§5），该被签发凭据自身的 audience **必须**在签发系统支持的范围内被约束到该绑定的目的地上。在令牌上强制的作用域强于在代理上强制的作用域，因为它在代理出错时依然成立。
 
 ## 5. 工作负载身份与生命周期

@@ -12,7 +12,7 @@ This spec defines the process (`process`) sub-policy of the `SandboxPolicy` obje
 - **Persistence** — whether a process may outlive the session that started it.
 - **System calls** — which kernel entry points the sandbox may use at all.
 
-This module exists because of a gap the rest of the proposal names explicitly. [exec.md](./exec.md) §1 and §3.6 state that `exec` policy is a control-interface gate and **not** a containment boundary: once a command is admitted, the process it starts may `fork`/`exec` anything without further `exec` evaluation, and for agent-generated code the admitted command is typically an interpreter. [overview.md](./overview.md) §2.3 draws the consequence — containment for self-started processes has to come from modules that enforce below the control interface.
+This module exists because of a gap the rest of the proposal names explicitly. [exec.md](./exec.md) §1 and §3.5 state that `exec` policy is a control-interface gate and **not** a containment boundary: once a command is admitted, the process it starts may `fork`/`exec` anything without further `exec` evaluation, and for agent-generated code the admitted command is typically an interpreter. [overview.md](./overview.md) §2.3 draws the consequence — containment for self-started processes has to come from modules that enforce below the control interface.
 
 `process` is that containment for the privilege and syscall surface, as `filesystem` is for paths and `network` is for destinations. The division of labour is fixed and not a matter of taste:
 
@@ -58,7 +58,7 @@ When `true`, a process MUST NOT be able to acquire privileges it did not already
 2. File capabilities MUST NOT take effect.
 3. The property MUST be inherited by every descendant process and MUST NOT be droppable by the process itself. A restriction a process can lift is not a restriction.
 
-The default is `false` at the `baseline` tier and `true` at `restricted` ([overview.md](./overview.md) §7.1). The default is permissive deliberately: `sudo` is a setuid binary, [exec.md](./exec.md) §3.4.2 lists it among the wrappers the platform is expected to parse, and images that use it are common. Denying privilege gain by default would break them at a point far from the policy that caused it. The credential-path precedent in [filesystem.md](./filesystem.md) §6.1 is different in kind — reading `~/.aws/credentials` is rare in a legitimate workload, whereas `sudo` is not.
+The default is `false` at the `baseline` tier and `true` at `restricted` ([overview.md](./overview.md) §7.1). The default is permissive deliberately: `sudo` is a setuid binary, [exec.md](./exec.md) §3.4 lists it among the wrappers the platform is expected to parse, and images that use it are common. Denying privilege gain by default would break them at a point far from the policy that caused it. The credential-path precedent in [filesystem.md](./filesystem.md) §6.1 is different in kind — reading `~/.aws/credentials` is rare in a legitimate workload, whereas `sudo` is not.
 
 ### 3.2 `allowedCapabilities`
 
@@ -159,7 +159,7 @@ Three deliberate **exclusions**, recorded here so that nobody assumes they were 
 
 | Excluded | Why |
 | --- | --- |
-| `ptrace` | Debuggers use it, and [exec.md](./exec.md) §3.4.2 lists `strace` and `ltrace` among the wrappers the platform parses. Denying it in the baseline would contradict a surface the proposal already expects to work. **On the VM substrate this exclusion does not hold** — see the substrate-specific set below. |
+| `ptrace` | Debuggers use it, and [exec.md](./exec.md) §3.4 lists `strace` and `ltrace` among the wrappers the platform parses. Denying it in the baseline would contradict a surface the proposal already expects to work. **On the VM substrate this exclusion does not hold** — see the substrate-specific set below. |
 | `unshare`, `chroot` | Creating one's *own* namespace or root is what legitimate in-workload sandboxing tools do, and `chroot` and `unshare` are both in the `exec` wrapper set. Note the asymmetry with `setns`, which is denied: creating a new namespace is a workload activity, whereas *joining an existing* one is only useful for reaching something outside your boundary. |
 | `mount`, `umount2` | Used by build and packaging tooling often enough that a baseline deny would produce confusing failures. Deployments that do not need it **SHOULD** add it via `deniedSyscalls`. |
 
@@ -177,7 +177,7 @@ deniedSyscalls:
 ```
 
 1. A deployment on the VM substrate MUST default to `syscall/1-vm` rather than `syscall/1`. Both remain pinnable by `baselineVersion`, and both are immutable once published (rules below).
-2. The cost is real and is not smoothed over: `strace`, `ltrace`, and `gdb` do not work inside a sandbox at this set, and [exec.md](./exec.md) §3.4.2 still parses those wrappers — an invocation is admitted by `exec` and then fails at the syscall boundary. A deployment that needs in-sandbox debugging pins `syscall/1` explicitly and accepts what §12.2 of [overview.md](./overview.md) says about the resulting guarantee.
+2. The cost is real and is not smoothed over: `strace`, `ltrace`, and `gdb` do not work inside a sandbox at this set, and [exec.md](./exec.md) §3.4 still parses those wrappers — an invocation is admitted by `exec` and then fails at the syscall boundary. A deployment that needs in-sandbox debugging pins `syscall/1` explicitly and accepts what §12.2 of [overview.md](./overview.md) says about the resulting guarantee.
 3. A deployment that pins `syscall/1` on the VM substrate MUST record the trust precondition in `knownLimitations` for every `process` and `filesystem` field it declares ([overview.md](./overview.md) §8.2.1 rule 5). It MUST NOT declare them `enforced` without that qualification.
 4. The container substrate MUST NOT default to `syscall/1-vm`. Denying `ptrace` there buys nothing this argument is about, and it would break debuggers for no gain — the enforcement is above the workload either way.
 

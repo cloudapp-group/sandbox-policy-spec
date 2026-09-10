@@ -17,9 +17,12 @@ expect:
   effectivePolicy:
     tier: compatibility
     network:
-      allowInternetAccess: true
+      internal:
+        mode: deny
+      egress:
+        defaultAction: allow
       ingress:
-        allowPublicTraffic: true
+        defaultAction: allow
     process:
       mode: baseline
       noNewPrivileges: false
@@ -51,9 +54,12 @@ expect:
   effectivePolicy:
     tier: restricted
     network:
-      allowInternetAccess: false
+      internal:
+        mode: deny
+      egress:
+        defaultAction: deny
       ingress:
-        allowPublicTraffic: false
+        defaultAction: deny
     process:
       mode: baseline
       noNewPrivileges: true
@@ -85,9 +91,12 @@ expect:
   effectivePolicy:
     tier: baseline
     network:
-      allowInternetAccess: true
+      internal:
+        mode: deny
+      egress:
+        defaultAction: allow
       ingress:
-        allowPublicTraffic: false
+        defaultAction: deny
 ---
 name: tier-merge-most-restrictive-wins
 spec: overview.md §5, §7.1

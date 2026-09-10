@@ -8,7 +8,7 @@
 
 **为什么需要。** 沙箱跑的是 Agent 生成的、部分可信的代码，爆炸半径不止数据外泄，还有凭据窃取、提权、失控循环与 Token 烧钱。而命令白名单挡不住一个已被放行的解释器 —— 真正的边界在控制接口之下。
 
-**六个模块。** `network`（出站/入站，有状态跟踪）、`filesystem`（路径与宿主挂载）、`exec`（控制接口门禁）、`process`（提权、持久化、系统调用）、`identity`（凭据以何种形式抵达沙箱）、`resource`（配额、窗口限额、Token 计量）。
+**六个模块。** `network`（出站/入站，有状态跟踪）、`filesystem`（路径级读/写/执行规则）、`exec`（控制接口门禁）、`process`（提权、持久化、系统调用）、`identity`（凭据以何种形式抵达沙箱）、`resource`（配额、窗口限额、Token 计量）。
 
 
 ## 几个例子
@@ -19,9 +19,14 @@
 
 ```yaml
 policy:
-  tier: restricted            # 默认全拒出站、无公共入站
+  tier: restricted            # 双向全拒，内网不可达
   network:
-    allowOut: ["*.pypi.org", "github.com"]
+    egress:
+      rules:
+        - name: pypi
+          priority: 100
+          action: allow
+          l4: { peer: { domains: ["*.pypi.org", "github.com"] } }
   filesystem:
     writableRoots: ["/workspace"]
 ```
@@ -51,8 +56,12 @@ policy:
     runAsNonRoot: true
     allowedCapabilities: ["none"]   # 空集，最强加固
   network:
-    portRules:
-      - { name: db, target: 10.20.0.5, protocols: [tcp], ports: ["5432"] }
+    egress:
+      rules:
+        - name: db
+          priority: 100
+          action: allow
+          l4: { protocol: tcp, ports: ["5432"], peer: { cidrs: ["10.20.0.5"] } }
 ```
 
 **边界也写清楚。** 行为检测不在范围内；无法强制之处明说，不用近似冒充。

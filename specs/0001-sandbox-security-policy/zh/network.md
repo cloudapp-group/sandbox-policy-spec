@@ -1,129 +1,216 @@
-# 规格：网络策略（Network Policy）
+# 规范：网络策略
 
-[提案 0001 — 沙箱安全策略](./overview.md) 的组成部分。本文档中的关键词 **必须（MUST）**、**不得（MUST NOT）**、**应该（SHOULD）**、**可以（MAY）** 依据 RFC 2119 解释。
+[Proposal 0001 — Sandbox Security Policy](./overview.md) 的一部分。关键词 **MUST**、**MUST NOT**、**SHOULD**、**MAY** 按 RFC 2119 解释。
 
 ---
 
 ## 1. 范围
 
-本规格定义 `SandboxPolicy` 对象的网络子策略：
+本规范定义 `SandboxPolicy` 对象的网络子策略。它由三部分组成，而它们是平级的：
 
-- **出站（Egress）** — L3/L4 可达性（IP/CIDR、基于域名的 DNS 学习）、端口与协议范围限定，以及 L7 HTTP/HTTPS 规则。
-- **入站（Ingress）** — 对沙箱公开入站访问的门控。
+- **出站（egress）** —— 沙箱可以访问什么。
+- **入站（ingress）** —— 什么可以访问沙箱。
+- **内网可达性（internal reachability）** —— 沙箱是否可以访问它所处的私有网络（§2.2）。
 
-求值是**有状态的**：规则描述的是连接，而一个已被放行连接的回程方向不需要自己对应的规则（§4.7）。这与云安全组提供的是同一份契约，也正是"一套可评审的规则"与"一套被临时端口区间反向条目撑满的规则"之间的分界。
+出站与入站用**同一种规则形状**表达（§2.1），每条规则携带一个显式的**优先级**，且每条规则在**四层或七层**二选一地陈述它的匹配。四层形式沿用云安全组模型（方向、协议、端口范围、授权对象、优先级、动作）。七层形式的目标沿用 URL 模型（scheme、host、port、path），其匹配器沿用 Gateway API `HTTPRoute` 模型（`path`、`headers`、`queryParams`，外加 `cookies`）。
 
-本规格**不重新定义**既有出站语法。`allowOut` / `denyOut` 的目标语法、`rules` 的 L7 规则语法、DNS 白名单与学习行为、内置私网 CIDR 拒绝均由别处规定；本规格将它们包装进统一策略对象，并定义合并、默认值与兼容性契约。
+求值是**有状态的**：规则描述的是连接，一个已被放行连接的回程方向无需自己的规则（§4.7）。这与云安全组提供的契约相同，也正是它把一份可评审的规则集与一份塞满了针对临时端口段的反向条目的规则集区分开来。
 
-> **未解决的依赖 —— 发布阻塞项。** 承载那些语义的文档（[出站网络策略](../../../guide/network-policy.md)、[安全代理](../../../guide/security-proxy.md)、[限制公开访问](../../../guide/restrict-public-access.md)）**不属于本仓库**，上面那些路径解析到本仓库之外。因此一个只持有本仓库的读者无法实现域名条目、DNS 学习、L7 规则语法或当前的入站令牌语义：本文档点了它们的名字而没有定义它们，而那与「引用并入」不是一回事。在这一点被修正之前，请把那四个面视为仅有名字而无规格。解决方式 —— 仓库内的带版本 bundle，或记录了版本与 SHA-256 的不可变 URL，无论哪种都要进合规性套件 —— 跟踪于 [overview.md](./overview.md) §11.15。
+本模块的早期版本是不对称的 —— 出站有 `allowOut`、`denyOut`、`portRules` 与七层 `rules`，而入站只有一个布尔和一个 host 改写字符串。那份不对称曾被记为本模块最大的开放问题，现在已经关闭。旧字段仍永久受支持，并被归一化进下面的结构（§8）。
+
+> **未解决的依赖 —— 发布阻断项。** 规定既有 DNS 学习行为与当前入站令牌语义的那些文档（[Egress Network Policy](../../../guide/network-policy.md)、[Security Proxy](../../../guide/security-proxy.md)、[Restrict Public Access](../../../guide/restrict-public-access.md)）**不属于本仓库**，上面的路径解析到仓库之外。因此只拿到本仓库的读者无法实现域名学习或入站令牌校验：本文档点了它们的名，却没有定义它们，这与「以引用方式纳入」不是一回事。解决办法 —— 一个仓库内的带版本捆绑包，或以版本与 SHA-256 记录的不可变 URL，无论哪种都进入合规性套件 —— 记为 [overview.md](./overview.md) §11.15。
 
 ## 2. 对象模型
 
 ```yaml
 policy:
   network:
-    allowInternetAccess: bool          # 默认: true
-    allowOut:      [string]            # IP / CIDR / 域名 / 前缀 "*." 通配域名
-    denyOut:       [string]            # 仅 IPv4 / IPv4 CIDR
-    portRules:     [PortRule]          # 按协议与端口限定范围的 L4 允许规则
-    rules:         [EgressRule]        # L7 规则，首匹配生效（既有语法）
-    onViolation:   deny | kill         # 默认：deny —— 见 §4.8
-    audit:         none | metadata     # 默认：none
+    internal:
+      mode:          deny | allow | identity   # 默认：deny —— 见 §2.2
+      allowedPeers:  [PeerRef]                 # 仅 identity 模式
+    egress:
+      defaultAction: allow | deny              # 由分级选择；见 §6
+      rules:         [NetworkRule]
     ingress:
-      allowPublicTraffic: bool         # 默认: true
-      maskRequestHost:   string        # Host 权威模板，"${PORT}" 展开
+      defaultAction: allow | deny              # 由分级选择；见 §6
+      rules:         [NetworkRule]
+    onViolation:     deny | kill               # 默认：deny —— 见 §4.8
+    audit:           none | metadata           # 默认：none
 ```
 
-### 2.1 `PortRule`
+`egress` 与 `ingress` 是同一种形状，因为它们在两个方向上回答同一个问题。两者谁都不是对方的从属，而向其一新增的字段**必须**同时向另一个新增，或在本文档中说明其缺席的理由。
 
-一条 `allowOut` 条目在**所有**端口上放行其目标。对于"让这个沙箱能访问我们的 API"来说这个形状是对的，而对于"让它只能用 TCP 访问这个数据库的 5432，别的都不行"来说就太粗了。`portRules` 就是那句更窄的表达。
+### 2.1 `NetworkRule`
 
 ```yaml
-- name:      string       # 必填，在列表内唯一；用于错误与审计
-  target:    string       # IP / CIDR / 域名 / 前缀 "*." 通配域名 —— 即 allowOut 语法
-  protocols: [string]     # {tcp, udp} 的子集；默认：[tcp, udp]
-  ports:     [string]     # "443" 或 "8000-8100"；默认：所有端口
+- name:     string          # 必填，列表内唯一
+  priority: int             # 必填，1–65535；数值越小越先求值
+  action:   allow | deny
+  l4:                       # 与 l7 互斥
+    protocol: tcp | udp | icmp | all      # 默认：all
+    ports:    [string]                    # "443" 或 "8000-8100"；默认：全部端口
+    peer:     Peer                        # 必填 —— 见 §2.3
+  l7:                       # 与 l4 互斥
+    scheme:      http | https             # 必填
+    hosts:       [string]                 # 必填；DNS 名、前导 "*." 通配
+    port:        int                      # 默认：http 为 80，https 为 443
+    method:      string                   # GET | POST | ... ；默认：任意
+    path:        HTTPMatch                # 可选
+    headers:     [NamedHTTPMatch]         # 可选
+    queryParams: [NamedHTTPMatch]         # 可选
+    cookies:     [NamedHTTPMatch]         # 可选
 ```
 
-1. 当目标、协议**且**端口全部匹配时，一条 `PortRule` 匹配该连接。匹配的规则以与 `allowOut` 条目完全相同的方式放行该连接（§4.1 第 3 步）。
-2. 域名目标与 `allowOut` 域名条目一样参与 DNS 学习；学习到的地址继承该规则的协议与端口限定。
-3. `portRules` 是**追加的允许面，而不是对 `allowOut` 的过滤器**。要把一个目标限制在特定端口上，就在 `portRules` 里指名它，并且**不要**在 `allowOut` 里写它。
-4. 一个已被 `allowOut` 宽泛放行、同时又在某条更窄 `PortRule` 中被指名的目标，仍然在所有端口上可达：更宽的允许胜出，端口限定不起作用。这不是错误 —— 模板的宽泛允许与请求的窄规则必须能共存 —— 但平台**必须**将其作为 `policyWarnings` 条目 `{field: "policy.network.portRules", rule, reason: "shadowed_by_allow_out"}` 报告。一位作者以为某项端口限制正在生效而实际上并没有，正是原则 4 存在所要防止的那种失败。
-5. 端口是 `1`–`65535` 范围内的单值或闭区间。格式错误的条目、逆序区间、以及 `{tcp, udp}` 之外的协议，**必须**以 `400 INVALID_POLICY` 拒绝。
-6. `portRules` 无法收窄或解除内置私网 CIDR 拒绝与绑定性拒绝（§4.6）。那些先于它求值，且不受端口限定影响。
+1. `name` **必须**在其所在列表内唯一。错误与审计事件用 `{direction, name}` 标识一条规则。
+2. **`l4` 与 `l7` 互斥。** 一条同时携带两者的规则**必须**以 `400 INVALID_POLICY` 拒绝。一条两者都不带的规则同样**必须**被拒绝：一条匹配一切的规则就是 `defaultAction`，把它写成规则只会把它藏起来。
+3. **一条 `l7` 规则隐含地放行它所需要的连接。** 匹配 `path` 或某个 header 需要一个已建立、已终结的连接，所以一条 `l7` allow 规则放行到其 `hosts` 的、在其 `port` 上的连接建立，随后只放行匹配其匹配器的那些请求。没有这一条，一条 `l7` 规则描述的就是一个永远无法抵达的请求。
+4. 到某条 `l7` 规则的 `hosts:port` 但**不**匹配其匹配器的请求，落到其余规则、再落到 `defaultAction`；它们不会因这次擦肩而过被隐式拒绝。一条规则陈述的是它放行什么，而不是它因遗漏而禁止什么。
+5. `icmp` **不得**与 `ports` 组合；这样的规则以 `400 INVALID_POLICY` 拒绝。
+6. 端口是 `1`–`65535` 内的单值或闭区间。畸形条目与反向区间**必须**以 `400 INVALID_POLICY` 拒绝。
+
+### 2.2 `internal` —— 私有网络的可达性
+
+沙箱所处的私有网段是地址空间里唯一一处「全部拒绝」与「全部允许」对不同部署都是合法默认、而真正有意思的答案两者皆非的地方。`internal` 陈述三者中哪一个适用：
+
+| `mode` | 含义 |
+| --- | --- |
+| `deny`（默认） | 到 §4.2 私有网段的流量在任一方向上都不通。这是今天的行为。 |
+| `allow` | 私有网段可达，受 §4.1 的普通规则约束。 |
+| `identity` | 仅对 `allowedPeers` 中所列的对象可达，由平台从沙箱身份而非从地址解析。 |
+
+1. `internal` 管辖 **`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16` 与 `169.254.0.0/16`**（§4.2）。它在每条规则之前求值，所以在 `deny` 下，没有任何优先级或来源的 `allow` 规则能触及那些网段。
+2. `identity` 模式是不写 CIDR 就表达「这些沙箱可以互相通信」的方式。`allowedPeers` 条目由平台解析；调用方**不得**指名一个它无权访问的对象（[overview.md](./overview.md) §5.2）。
+3. **`mode: allow` 包含云元数据端点，其代价在此写明而不留给人去发现。** `169.254.169.254` 及其等价端点提供实例凭据。一个能访问它们的沙箱可以直接取得实例角色的凭据，这会完全绕过 [identity.md](./identity.md) —— `exposure: proxy` 把一个密钥挡在沙箱之外，而这个设置递上了另一个。因此：
+   - 一份既有 `internal.mode: allow` **又**有任何 `identity.secrets` 绑定解析为 `exposure: proxy` 的策略，**必须**产生一条 `policyWarnings` 条目 `{field: "policy.network.internal.mode", reason: "metadata_endpoint_reachable"}`。两者还不至于矛盾到要拒绝，但一个部署**不得**在无人告知的情况下配出这一对。
+   - 当需求是沙箱间通信时，部署**应该**优先用带显式对象的 `identity` 模式而非 `allow`，因为那个需求从不需要元数据端点。
+4. `127.0.0.0/8` **不在本模块范围内**。沙箱内的 loopback 是该沙箱自己进程之间的通信，在容器基质上则是一个 Pod 各容器之间的通信 —— 那在沙箱单位**内部**（[overview.md](./overview.md) §12.1），不跨越它。一份声称管辖它的网络策略，描述的是那里并不存在的边界。
+5. 合并取最严模式：`deny` > `identity` > `allow`。`allowedPeers` 跨来源取交集。
+
+### 2.3 `Peer` —— 一条四层规则的授权对象
+
+```yaml
+peer:
+  cidrs:        [string]      # IPv4 地址或 CIDR
+  domains:      [string]      # DNS 名或前导 "*." 通配 —— 仅出站
+  sandboxGroup: string        # 平台解析的沙箱身份
+```
+
+1. 三者中**必须**至少有一个存在。空的 `peer` 以 `400 INVALID_POLICY` 拒绝。
+2. `domains` 仅在**出站**有意义。入站规则上的域名**必须**以 `400 INVALID_POLICY` 拒绝：一个入站连接的来源是地址，把它与名字匹配需要一次由发送方控制的反向查询。
+3. 域名条目通过 DNS 学习实现（§4.3），而这是本模块在不同部署之间最大的能力差异（§11）。
+4. `sandboxGroup` 需要 `internal.mode: identity` 才有任何效果；在 `deny` 下指名一个**必须**产生一条 `policyWarnings` 条目 `{reason: "peer_unreachable_under_internal_deny"}`，而不是静默的空操作。
+5. 这是其他模块提到网络目标时所指的那套语法 —— [identity.md](./identity.md) §4.1 就是其中之一。
+
+### 2.4 `HTTPMatch` 与 `NamedHTTPMatch`
+
+匹配器形状沿用 Gateway API `HTTPRoute`，使一位懂其中一个的运维也懂另一个：
+
+```yaml
+HTTPMatch:                    # 用于 path
+  type:  Exact | PathPrefix | RegularExpression    # 默认：PathPrefix
+  value: string
+
+NamedHTTPMatch:               # 用于 headers、queryParams、cookies
+  type:  Exact | RegularExpression                 # 默认：Exact
+  name:  string
+  value: string
+```
+
+1. Header 名不区分大小写；header 值、查询参数名与值、cookie 名与值区分大小写。
+2. 一个列表里的多个条目按 **AND** 组合。一条列了两个 header 的规则匹配一个同时携带两者的请求。
+3. `cookies` 是 `Cookie` header 上的便捷形式，本文档明说这一点而不暗示它是一个独立维度：一个 `cookies` 条目在从该 header 解析出的具名 cookie 匹配时匹配。`HTTPRoute` 没有 cookie 匹配器；这是新增，不是借用。
+4. `RegularExpression` 支持对实现而言是**可选**的。不实现它的部署**必须**把它声明为 `unsupported`（[overview.md](./overview.md) §8.2），而不是静默地把一个模式当作字面量处理 —— 那会把一条窄规则变成匹配不到任何东西的规则，或把一个 deny 变成一个洞。
+5. 类型为 `PathPrefix` 的 `path` 按整个路径段匹配，而非按字符串前缀：`/v1` 匹配 `/v1` 与 `/v1/x`，不匹配 `/v11`。
 
 ## 3. 字段规格
 
-| 字段 | 类型 | 约束 | 默认值 | 语义 |
+| 字段 | 类型 | 约束 | 默认 | 语义 |
 | --- | --- | --- | --- | --- |
-| `allowInternetAccess` | `bool?` | — | `true` | 为 `false` 时安装 deny-all 出站兜底，仅显式 allow 条目与 L7 目标可打通。 |
-| `allowOut` | `[string]?` | 每项：IPv4、IPv4 CIDR、合法 DNS 名称、前导 `*.` 通配 DNS 名称。非法条目**必须**导致校验失败。 | `[]` | 显式允许的出站目标。域名条目参与 DNS 学习。 |
-| `denyOut` | `[string]?` | 每项：IPv4 或 IPv4 CIDR。域名**必须**以 `400 INVALID_POLICY` 拒绝。 | `[]` | 显式拒绝的出站目的地。 |
-| `portRules` | `[PortRule]?` | 按 §2.1。`name` 在列表内**必须**唯一。 | `[]` | 按端口与协议限定范围的允许规则。 |
-| `rules` | `[EgressRule]?` | 遵循既有 L7 规则语法：`name`、`match.{scheme,sni,host,method,path}`、`action.{allow,audit,inject}`。 | `[]` | L7 HTTP/HTTPS 规则，首匹配生效。 |
-| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.8。注意 `kill` 结束的是**沙箱**，不是某个进程。 |
-| `audit` | `enum?` | `none` \| `metadata` | `none` | **普通**连接活动的审计级别（§7）。它不压制违规事件（[overview.md](./overview.md) §8.1.4）。 |
-| `ingress.allowPublicTraffic` | `bool?` | — | `true` | 为 `false` 时，公开入站访问需要携带有效的 traffic-access token。 |
-| `ingress.maskRequestHost` | `string?` | Host 权威模板；`${PORT}` 展开为所请求的沙箱端口。 | 未设置 | 改写转发给沙箱服务的 Host 权威。仅作用于入站。 |
+| `internal.mode` | `enum?` | `deny` \| `allow` \| `identity` | `deny` | §2.2。 |
+| `internal.allowedPeers` | `[PeerRef]?` | 仅在 `identity` 下有意义。 | `[]` | §2.2.2。 |
+| `egress.defaultAction` | `enum?` | `allow` \| `deny` | 由分级选择（§6） | 无规则匹配的连接的裁决。 |
+| `egress.rules` | `[NetworkRule]?` | 按 §2.1。`name` 唯一；合并后 `priority` 在方向内唯一（§5）。 | `[]` | 出站规则。 |
+| `ingress.defaultAction` | `enum?` | `allow` \| `deny` | 由分级选择（§6） | 无规则匹配的入站连接的裁决。 |
+| `ingress.rules` | `[NetworkRule]?` | 按 §2.1；`peer.domains` **不得**使用（§2.3.2）。 | `[]` | 入站规则。 |
+| `onViolation` | `enum?` | `deny` \| `kill` | `deny` | §4.8。注意 `kill` 结束的是**沙箱**，不是进程。 |
+| `audit` | `enum?` | `none` \| `metadata` | `none` | **普通**连接活动的审计级别（§7）。它不抑制违规事件（[overview.md](./overview.md) §8.1.4）。 |
 
 ## 4. 求值语义
 
-以引用方式并入既有出站规格；此处摘要为规范性锚点：
+### 4.1 决策顺序
 
-1. **出站判定顺序**对每个连接**必须**为：
+对每个连接，以及对一个被 `l7` 规则放行的连接上的每个请求：
 
-   | 步骤 | 检查 | 结果 |
-   | --- | --- | --- |
-   | 1 | 内置私网 CIDR 拒绝（见下第 2 项） | 拒绝 —— 任何策略来源都不可覆盖 |
-   | 2 | **绑定性拒绝（binding deny）**（§4.6）—— 由优先级低于请求的来源贡献的 `denyOut` 条目 | 拒绝 —— **不可**被请求级 `allowOut` 覆盖 |
-   | 3 | 命中 `allowOut`，或 `portRules` 在目标 + 协议 + 端口上命中（§2.1） | 允许（带 L7 标记的目标其 HTTP/HTTPS 流量进入 L7 求值） |
-   | 4 | 命中 `denyOut`（其余的、请求级条目） | 拒绝 |
-   | 5 | 其他 | 允许 —— 除非 `allowInternetAccess: false` 已安装 deny-all 兜底 |
+| 步骤 | 检查 | 结果 |
+| --- | --- | --- |
+| 1 | `internal`（§2.2）—— 对象是否落在此模式所禁止的私有网段？ | 拒绝；任何规则、优先级、来源都不能越过 |
+| 2 | **绑定拒绝**（§4.6）—— 由 `template` 或 `profile` 贡献的 `deny` 规则 | 拒绝；任何来源、任何优先级的 `allow` 规则都不能越过 |
+| 3 | 匹配方向的其余规则，按 `priority` 顺序（§4.5） | 首个匹配胜出：`allow` 放行、`deny` 拒绝 |
+| 4 | 无规则匹配 | 该方向的 `defaultAction` |
 
-2. **内置拒绝。** 除非 `allowInternetAccess: false` 已安装 deny-all，沙箱私网与宿主内部 CIDR（`10.0.0.0/8`、`127.0.0.0/8`、`169.254.0.0/16`、`172.16.0.0/12`、`192.168.0.0/16`）**必须**保持拒绝，且不受用户策略影响。用户策略**不得**能够放行这些网段。
-3. **域名语义。** 域名 allow 条目通过 DNS A 记录学习实现，产生按 TTL 过期的临时 allow 条目；此行为是规范性的且保持不变。
-4. **条目上限。** 每沙箱最终唯一条目数**不得超过**：allow 表 8192、deny 表 8192、域名规则表 1024。`portRules` 条目在按其协议与端口区间展开后计入 **allow 表**，因为那正是它们被落实的地方。超限使创建请求失败，返回 `400 POLICY_NETWORK_LIMIT`，载荷 `{map, got, max}`。
-5. `rules` 在合并后的规则列表上**首匹配生效**。
+第 1、2 步位于优先级之前，理由相同：它们是策略中不允许被高优先级来源放宽的部分（[overview.md](./overview.md) §5），而优先级数值由写规则的人写。
 
-### 4.6 拒绝来源与绑定性拒绝
+### 4.2 私有网段
 
-allow 先于 deny（第 3 步先于第 4 步）是今天的行为，予以保留 —— 因为模板刻意用「宽泛 `denyOut` + 精确 `allowOut`」打洞的配置依赖它。但这一顺序跨来源应用时，调用方只要在请求里内联一条 `allowOut`，就能放宽管理员设定的边界 —— 这与共享合并原则「高优先级只能收窄、不得放宽」（[overview.md](./overview.md) §5）正相反。来源标记（provenance）封堵该缺口：
+`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16` 与 `169.254.0.0/16` 由 `internal`（§2.2）管辖，且仅由它管辖。在 `internal.mode: deny` 下 —— 每个分级的默认 —— 它们不论任何规则都不可达。
 
-1. 每个合并后的 `allowOut` / `denyOut` 条目**必须**保留其**来源**：`template`、`profile` 或 `request`。
-2. 来源为 `template` 或 `profile` 的 `denyOut` 条目是**绑定性拒绝**。绑定性拒绝在所有 `allowOut` 条目之前求值，且**不得**被任何来源的 `allowOut` 条目覆盖。
-3. 同一来源内部，allow 先于 deny 依然成立：`allowOut` 条目可以在**同一来源**贡献的 `denyOut` 条目上打洞。
-4. 被绑定性拒绝完全遮蔽的请求级 `allowOut` 条目**不得**导致创建请求失败。它**必须**在创建响应中以 `policyWarnings` 条目 `{field: "policy.network.allowOut", entry, shadowedBy, source}` 呈现，并**必须**发出审计事件，使调用方得知其申请的洞并未打开（原则 4：拒绝必须可解释）。
-5. 来源标记**必须**在策略 API 暴露的生效策略中保留，使运维方能看出每个条目由哪个来源贡献。
+这取代了一条用户策略永远无法解除的无条件拒绝。这个改动是刻意的：先前那条规则使沙箱间通信无法表达，并把用户推向手写从不奏效的私有 CIDR，那正是前一版本 §10.7 所描述的失败。**没有**被放宽的是：访问这些网段现在是某个人必须显式做出的决定，写在一个出现在生效策略、快照与审计轨迹里的字段中。
+
+### 4.3 域名语义
+
+`peer.domains`（§2.3）中的域名条目与一条 `l7` 规则中的 `hosts`，通过带 TTL 上界的临时条目的 DNS A 记录学习实现。两条要求使它可强制而非仅是建议：
+
+1. 平台**必须**是沙箱通往名字解析的唯一路径。一个能直接查询外部解析器 —— 走 UDP/TCP 53、DoT 或 DoH —— 的工作负载，可以解析一个策略从未学到的名字然后连到结果地址，这使域名规则沦为建议。无法确保这一点的部署**必须**把域名条目声明为 `unsupported`（[overview.md](./overview.md) §8.2），而不是部分强制它们。
+2. 在准入时把一个名字解析一次并钉住地址，**不是**域名规则的实现。它是一条戴着域名名字的地址规则，[overview.md](./overview.md) §8.2.1 规则 4 禁止把它当作强制来上报。
+
+### 4.4 条目上限
+
+每个沙箱最终的唯一条目数**不得**超过：8192 条 allow、8192 条 deny、1024 条域名、每方向 256 条规则。四层规则在按其协议与端口区间展开后计入 allow 或 deny 映射，因为它们是在那里被实现的。违反者以 `400 POLICY_NETWORK_LIMIT` 使创建请求失败，携带 `{map, got, max}`。
+
+### 4.5 优先级
+
+1. `priority` 是 `1`–`65535` 内的整数。**越小越先求值**，沿用安全组惯例。
+2. 在一个方向内，求值是按优先级顺序的**首个匹配胜出**。一旦某条规则匹配，不再查阅后续规则。
+3. 合并后，一个方向内的两条规则**不得**共用一个优先级。冲突**必须**以 `400 POLICY_NETWORK_PRIORITY_CONFLICT` 拒绝，携带两条规则名及其来源。这是刻意的，也是本模块唯一一处选择报错而非约定的地方：一个隐式的平局决胜是一份规则集所能拥有的最难调试的行为，而每一种替代方案 —— 按来源顺序、按名字顺序、最严者优先 —— 都产生一份其求值顺序在运维所读文档中不可见的策略。
+4. 优先级为规则排序；它不授予权限。§4.1 的第 1、2 步在任何优先级比较之前求值，所以一条请求级规则不能用一个小数值去越过管理员的 deny。
+5. 旧字段归一化进保留的优先级带（§8），使一份旧配置与一份显式规则集能共存而不冲突。
+
+### 4.6 拒绝来源与绑定拒绝
+
+1. 每条合并后的规则**必须**保留其**来源**：`template`、`profile` 或 `request`。
+2. 一条来源为 `template` 或 `profile` 的 `deny` 规则是一条**绑定拒绝**。绑定拒绝在 §4.1 第 2 步求值，且**不得**被任何来源、任何优先级的任何 `allow` 规则越过。
+3. 在单一来源内，普通优先级顺序适用：来自**同一**来源的、数值更小的 `allow` 规则胜过一条 `deny` 规则。
+4. 一条被绑定拒绝完全遮蔽的请求级 `allow` 规则**不得**使创建请求失败。它**必须**被报为一条 `policyWarnings` 条目 `{field, rule, shadowedBy, source}` 并作为审计事件发出，使调用方得知它所要求的洞没有被打开。
+5. 来源**必须**在 API 暴露的生效策略中保留，使运维能看到每条规则由哪个来源贡献。
 
 ### 4.7 连接状态
 
-§4 中的每一条规则描述的都是一个**连接**，而不是单个数据包。这个区分是规范性的，不是实现细节：
+§4 中的每条规则描述的是**连接**，不是单个数据包：
 
 | | 要求 |
 | --- | --- |
-| 回程流量 | 属于一个已被 §4.1 放行的连接的流量，**必须**在该连接存续期间被允许通过，无需自己对应的匹配规则。 |
-| 回程方向不是 ingress | 由沙箱发起的连接，其入向的那一半**不是** ingress，**不得**受 `ingress.allowPublicTraffic`（§3）约束。设置 `ingress.allowPublicTraffic: false` 绝不会破坏一次出站请求的响应。 |
-| 无连接协议 | 对 UDP 与 ICMP，"连接"指由平台跟踪、带有已文档化空闲超时的一条流。回程方向的保证对这样一条流的适用方式，与对 TCP 完全相同。 |
-| 端口规则 | 一条 `PortRule`（§2.1）限定的是出向那一半的**目标端**。它的回程流量抵达时源端口是临时端口，其通过依据的是连接状态，而不是第二条规则。 |
+| 回程流量 | 属于一个已被放行连接的流量**必须**在该连接存续期间被允许，无需自己的匹配规则。 |
+| 回程方向不是入站 | 一个沙箱发起的连接的入向半程**不是**入站，**不得**对照 `ingress` 规则或 `ingress.defaultAction` 求值。设 `ingress.defaultAction: deny` 从不破坏一个出站请求的响应。 |
+| 无连接协议 | 对 UDP 与 ICMP，「连接」指平台以一个有文档记录的空闲超时跟踪的流。回程方向的保证对这样一个流的适用，与它对 TCP 的适用完全相同。 |
+| 四层端口范围 | 一条四层规则限定它所管辖方向的**目的地**。临时端口上的回程流量由连接状态放行，不由第二条规则放行。 |
+| 七层请求 | 有状态性适用于连接。一个已放行连接上的各个请求按 §4.1 求值，所以一个连接可以被建立而其上的一个后续请求仍被拒。 |
 
-这一点被写下来而不是留给数据路径，因为它正是让一套规则可被评审的那个属性。在无状态模型下，每一条 `allowOut` 条目都需要配一条覆盖临时端口区间的反向条目 —— 而那既是每个作者都会忘掉的东西，又在一旦写出之后成为一个远比它本要服务的那条规则更宽的洞。云安全组正是因为这个原因而有状态，而本规格连同语法一并继承了这个预期（§1）。
+这被写下来而不是留给数据路径，因为它是使一份规则集可评审的那个性质。在无状态模型下，每条 allow 规则都需要一条覆盖临时端口段的伴随反向条目 —— 那既是每个作者都会忘的东西，又在写出后成为一个远比它本欲服务的规则更宽的洞。
 
 ### 4.8 违规动作
 
-依 [overview.md](./overview.md) §8.1，`onViolation` 决定当 §4.1 拒绝一个连接时会发生什么：
+按 [overview.md](./overview.md) §8.1，`onViolation` 决定 §4.1 拒绝一个连接或一个请求时发生什么：
 
 | 动作 | 结果 |
 | --- | --- |
-| `deny`（默认） | 连接像今天一样失败：被拒 TCP 返回 `ECONNREFUSED` 类 RST，其余丢弃（§7）。 |
+| `deny`（默认） | 连接如今天一样失败：被拒 TCP 收到一个 `ECONNREFUSED` 类的 TCP reset，其余丢弃。一个被拒的七层请求收到 `403`。 |
 | `kill` | **沙箱**被终止。 |
 
-第二行的粒度正是本小节的要点，而它是一个局限，不是一种设计偏好：
-
-1. **这里的 `kill` 结束的是沙箱，而不是那个违规进程。** L3/L4 强制执行作用在数据包上。当一个连接被拒绝时，在那一层已经无法可靠地知道是哪个进程打开了这个 socket —— 而一次尽力而为的归因比不归因更糟，因为它会终止那个被猜中的进程。结束沙箱是这个强制执行点唯一能诚实采取的动作。
-2. **因此一个设置 `kill` 的部署，选择的是"一个被拒连接终结整个沙箱"。** 对于一个本就绝不该访问未被指名目标的工作负载，这是一种正当的姿态；而对任何会做探测的东西，它是破坏性的。它**不得**在"以为它的行为像 `filesystem` 或 `process` 的 `kill`"的假设下被选择，那两者是进程级的（[overview.md](./overview.md) §8.1.3）。
-3. **内置私网 CIDR 拒绝（§4.2）也参与其中。** 在 `kill` 之下，一次到 `169.254.169.254` 的连接尝试会终结沙箱。这是 `kill` 最站得住脚的场景 —— 没有任何正当的东西会去访问元数据端点 —— 同时也是最可能意外触发的场景，因为有些运行时会在启动时探测这类地址。请先影子那个分级（§6.1）。
-4. 没有 `warn`，理由见 [overview.md](./overview.md) §8.1.2。`auditTier`（§6.1）才是一个部署用来弄清"一个更严的姿态会拒绝哪些目标"、同时让当前规则保持强制的方式。
-5. 两种动作都会产生违规事件，且在任何审计级别下都产生（§7）。
+1. **这里的 `kill` 结束的是沙箱，不是那个违规进程。** 四层强制作用于数据包，而在一个连接被拒时，打开该 socket 的进程在那一层不可靠地可知。尽力而为的归属比不归属更糟，因为它会终止那个猜测所落到的进程。
+2. **一个设 `kill` 的部署是在选择「一次被拒连接结束沙箱」。** 对一个绝不该访问未具名目的地的工作负载这是合法姿态，对任何会探测的东西这是破坏性的。它**不得**在假定它像 `filesystem` 或 `process` 那种进程级 `kill` 的前提下被选择。
+3. **当强制点是一个共享网关而非沙箱自己的数据路径时，`kill` 是异步的。** 网关拒绝连接，沙箱由一次后续的控制面动作终止，所以存在一个连接已被拒而沙箱仍在运行的窗口。处于这种形态的部署**必须**把 `onViolation: kill` 声明为 `partial` 并记录那个窗口的上界；它**不得**把一次延迟终止上报为一次即时终止。
+4. 没有 `warn`，理由见 [overview.md](./overview.md) §8.1.2。`auditTier`（§6.1）是部署在保持当前规则被强制的同时得知一个更严姿态会拒绝哪些目的地的方式。
+5. 任一动作都发出一个违规事件，在每个审计级别（§7）。
 
 ### 4.9 强制执行作用域
 
@@ -131,11 +218,11 @@ allow 先于 deny（第 3 步先于第 4 步）是今天的行为，予以保留
 
 1. 本策略在沙箱所处的**网络命名空间**上被强制执行。在 VM 基质上，那个命名空间恰好属于唯一一个沙箱。在容器基质上，沙箱单位是一个 Pod（[overview.md](./overview.md) §12.1），而一个 Pod 恰好拥有一个网络命名空间。因此在两种基质上，作用域与沙箱都是重合的。
 2. 这份重合正是 §12.1 把单位定为 Pod 而不是容器的原因。以容器为单位会把本策略置于比沙箱更宽的作用域上，而在那里没有任何正确的行为可选：数据路径或出网路径上的强制点是按源地址归属连接的，而同处一地的容器共用同一个源地址，于是平台无法判定该施加谁的策略。
-3. 部署**不得**把两个沙箱放进同一个网络命名空间。当某个实现仍然这样做时 —— 一个跨单位共享命名空间的运行时，或一个手工构造出这种共享的部署 —— 该创建请求**必须**以 `400 POLICY_NETWORK_SCOPE_CONFLICT` 拒绝，携带冲突的字段以及那个建立了当前配置的沙箱，而不是继续下去。
-4. 平台**不得**通过取最严值、取并集或取最近一次来消解这种情形。这三者中的每一个都会静默地让一个沙箱的策略去治理另一个沙箱的流量，而那既是本对象并未描述的一种边界，也是它所能产生的最难调试的失败：一位运维读任一沙箱的生效策略，看到的都是一份与实际数据包不符的文档。
-5. 规则 3 是针对*解析后*配置的创建时检查，而不是文本比较。两个通过不同来源抵达同一份生效策略的沙箱本会满足它 —— 尽管按规则 3，它们本就不该共享一个命名空间。
+3. 部署**不得**把两个沙箱放进同一个网络命名空间。当某个实现仍然这样做时，该创建请求**必须**以 `400 POLICY_NETWORK_SCOPE_CONFLICT` 拒绝，携带冲突的字段以及那个建立了当前配置的沙箱，而不是继续下去。
+4. 平台**不得**通过取最严值、取并集或取最近一次来消解这种情形。这三者中的每一个都会静默地让一个沙箱的策略去治理另一个沙箱的流量，而那既是本对象并未描述的一种边界，也是它所能产生的最难调试的失败。
+5. 规则 3 是针对*解析后*配置的创建时检查，而不是文本比较。
 
-这套安排没有解决的是同处问题的*另一半*。一个 Pod 内的容器处在同一个沙箱之内，所以它们按构造共享本策略，这里不会产生冲突；但它们同时也共享一份 `policy.process` 和一份 `policy.filesystem`，而这份策略要展开到那些可能合理地需要不同姿态的容器上 —— 一个 mesh 代理紧挨着由 agent 生成的代码。那份张力是挪了位置而非消失了，它被记为 [overview.md](./overview.md) §11.14。
+这套安排没有解决的是同处问题的*另一半*。一个 Pod 内的容器处在同一个沙箱之内，所以它们按构造共享本策略；但它们同时也共享一份 `policy.process` 和一份 `policy.filesystem`，而这份策略要展开到那些可能合理地需要不同姿态的容器上。那份张力是挪了位置而非消失了，它被记为 [overview.md](./overview.md) §11.14。
 
 ## 5. 合并语义
 
@@ -143,129 +230,144 @@ allow 先于 deny（第 3 步先于第 4 步）是今天的行为，予以保留
 
 | 字段 | 合并细化 |
 | --- | --- |
-| `allowInternetAccess` | 请求显式值覆盖模板/策略档；缺省保持低优先级值。当低优先级来源已设为 `false` 时，请求**不得**设为 `true` —— deny-all 兜底只能收紧、不能解除（以 `400 POLICY_NETWORK_CONFLICT` 拒绝）。 |
-| `allowOut`、`denyOut` | 高优先级条目追加在低优先级条目之后，按规范化条目去重。每个条目保留其来源标记（§4.6）；去重时**必须**为重复条目保留**最低**优先级的来源标记，使拒绝保持绑定性。 |
-| `portRules` | 按 `name` 追加并去重。条目保留来源标记，并与 `allowOut` 条目完全一样受绑定性拒绝约束（§4.6）：被绑定性拒绝遮蔽的 `portRule` 不会打开，且**必须**以 `policyWarnings` 条目上报。 |
-| `rules` | 高优先级规则排在低优先级规则之前。同名规则**不**合并也不替换；两条都保留、请求侧在前，由首匹配决定实际结果。 |
-| `onViolation` | `kill` 胜出（[overview.md](./overview.md) §8.1.7）。鉴于 §4.8，一个设置 `kill` 的模板会让由它创建的沙箱的每一次连接拒绝都成为致命的，而请求无法把它调软。 |
+| `internal.mode` | 最严者胜出：`deny` > `identity` > `allow`。请求**不得**在低优先级来源设了 `deny` 或 `identity` 处设 `allow`；这样的请求以 `400 POLICY_NETWORK_CONFLICT` 拒绝。 |
+| `internal.allowedPeers` | 跨来源**取交集**。请求不能添加模板未许可的对象。 |
+| `egress.defaultAction`、`ingress.defaultAction` | `deny` 胜出。请求**不得**在低优先级来源设了 `deny` 处设 `allow`（以 `400 POLICY_NETWORK_CONFLICT` 拒绝）。 |
+| `egress.rules`、`ingress.rules` | 跨来源追加。每条规则保留其来源（§4.6）。合并后优先级**不得**冲突（§4.5.3）。来自 `template` 或 `profile` 的 `deny` 规则成为绑定拒绝。 |
+| `onViolation` | `kill` 胜出（[overview.md](./overview.md) §8.1.7）。鉴于 §4.8，一个设 `kill` 的模板使从它创建的沙箱的每次被拒连接都致命，而请求无法软化它。 |
 | `audit` | 更详细者胜出（`metadata` > `none`）。 |
-| `ingress.*` | 标量语义；显式值覆盖。 |
+
+规则从不按 `name` 合并。两个来源贡献同名规则会产生两条规则，以来源区分，且它们的优先级仍必须不同。
 
 ### 5.1 可授权字段
 
-依 [overview.md](./overview.md) §5.1.8，针对本模块的限时授权可以打开：
+按 [overview.md](./overview.md) §5.1.8，针对本模块的限时授权可以打开：
 
 | 可授权 | 不可授权 |
 | --- | --- |
-| `allowOut` —— 具名目标 | `allowInternetAccess: true` |
-| `portRules` —— 具名规则 | 移除任何 `denyOut` 条目 |
+| `egress.rules` —— 具名 `allow` 规则 | `egress.defaultAction` / `ingress.defaultAction` |
+| `ingress.rules` —— 具名 `allow` 规则 | `internal.mode` —— 任何放宽 |
+| `internal.allowedPeers` —— `identity` 下的具名对象 | 移除任何 `deny` 规则 |
 
-`allowInternetAccess: true` 被排除，因为它不是一个形状已知的洞（[overview.md](./overview.md) §5.1.4）：它一次性对所有目的地解除 deny-all 兜底。一个任务若需要多访问一个端点十分钟，那就申请那个端点。与所有地方一样，授权无法重新打开绑定性拒绝已关上的东西，也无法打开内置私网 CIDR 拒绝（§4.1 第 1 步）。
+`defaultAction` 被排除，因为它不是一个形状已知的洞（[overview.md](./overview.md) §5.1.4）：翻转它会一次打开每一个目的地。一个需要多一个端点十分钟的任务，去要那个端点。`internal.mode` 被排除，理由相同，外加第二条 —— 按 §2.2.3 放宽它会暴露元数据端点，而在一次十分钟授权期间取得的凭据不随它过期。
 
 ## 6. 默认值
 
-缺省 `policy.network` 解析为策略所解析到的那个分级的服务端默认值（[overview.md](./overview.md) §7.1）—— 对于省略 `tier` 的 `policy` 对象即 `restricted`。
-
-完全不带 `policy` 对象的请求解析为 `tier: compatibility`（[overview.md](./overview.md) §7），而它逐字节等于今天的行为：
+一个完全不带 `policy` 对象的请求解析为 `tier: compatibility`（[overview.md](./overview.md) §7），而它就是今天的行为：
 
 ```yaml
-network:                 # tier: compatibility —— 仅遗留路径
-  allowInternetAccess: true
-  allowOut: []
-  denyOut: []            # 加内置私网 CIDR 拒绝
-  portRules: []
-  rules: []
+network:                 # tier: compatibility —— 仅旧路径
+  internal:
+    mode: deny
+  egress:
+    defaultAction: allow
+    rules: []
+  ingress:
+    defaultAction: allow
+    rules: []
   onViolation: deny
   audit: none
-  ingress:
-    allowPublicTraffic: true
 ```
 
-一个省略了 `tier` 的 `policy` 对象解析为 `restricted`，而本模块在那一档中的份额是全拒出站、无公共入站。**`compatibility` 是唯一把 `ingress.allowPublicTraffic` 留着开的分级**，也是唯一能为此主张一个兼容性理由的分级：一个默认可达的沙箱是一个可用性默认，而不是一个安全默认（[overview.md](./overview.md) §7.1）。`tier: baseline` 位于两者之间 —— 互联网出站开、公共入站关 —— 供那个最常见的场景：一个必须拉取依赖、但绝不该被拨入的工作负载。
+一个省略 `tier` 的 `policy` 对象解析为 `restricted`。逐分级：
 
-在 `tier: restricted` 之下，同一批字段改为解析出 deny-all 姿态 —— `allowInternetAccess: false` 与 `ingress.allowPublicTraffic: false` —— 从而让「未经指名就不进不出」成为策略上的一个字段，而不是每个模块两个字段。分级只改这些默认值；§4 的每一条求值规则都不变，同一来源内的显式字段依然胜出（[overview.md](./overview.md) §7.1 规则 3）。`onViolation` 在 `restricted` 之下仍是 `deny`，依 [overview.md](./overview.md) §8.1.7 —— 而在这里尤其如此，因为一个把 deny-all 出站与 `kill` 配在一起的分级，会在沙箱访问第一个未被指名目标时就把它终结，而那离「给我一个被锁定的沙箱」这个诉求已经非常远了。
+| | `compatibility` | `baseline` | `restricted`（默认） |
+| --- | --- | --- | --- |
+| `internal.mode` | `deny` | `deny` | `deny` |
+| `egress.defaultAction` | `allow` | `allow` | `deny` |
+| `ingress.defaultAction` | `allow` | `deny` | `deny` |
+| `audit` | `none` | `none` | `metadata` |
+
+`internal.mode` 在**每个**分级下都是 `deny`，包括 `unrestricted`。分级是默认值选择器，而没有一个默认值应当让私有网络可达 —— 那是关于一个部署拓扑的决定，而分级无从知道。因此访问私有网络永远是一个显式动作，在生效策略中可见。
+
+**`compatibility` 是唯一把 `ingress.defaultAction` 留在 `allow` 的分级**，也是唯一对这样做有兼容性理由的：一个默认可达的沙箱是可用性默认而非安全默认（[overview.md](./overview.md) §7.1）。`baseline` 处在两者之间 —— 出站开、入站关 —— 面向那个必须拉取依赖却绝不该被拨入的常见情形。
+
+`onViolation` 在每个分级下都留在 `deny`，按 [overview.md](./overview.md) §8.1.7 —— 在这里尤其如此，因为一个把全拒出站与 `kill` 配对的分级会在沙箱访问它第一个未具名目的地时就终止它。
 
 ### 6.1 影子评估支持
 
-依 [overview.md](./overview.md) §7.2.5，本模块在 `auditTier` 之下对其完整的出站与入站面支持影子评估。更严分级的规则集与被强制执行的那一套并行求值；影子集合本来会拒绝的连接**照常建立**，并产生一条 `shadow: true` 审计事件，指名目标、端口与协议，以及本来会拒绝它的那个影子字段。
+按 [overview.md](./overview.md) §7.2.5，本模块对其完整面 —— 两个方向、`defaultAction`、每条规则以及 `internal.mode` —— 支持 `auditTier` 下的影子评估。一个影子集合本会拒绝的连接或请求仍照常进行，并发出一个 `shadow: true` 审计事件，指名目的地、端口与协议或请求行，以及本会拒绝它的那条影子规则。
 
-这是本提案中最容易依据其发现采取行动的一处影子，因为发现本身*就是*修法：`auditTier: restricted` 下的一份影子报告，就是一份 deny-all 姿态需要写进 `allowOut` 或 `portRules` 的目标清单。运维可以把那份清单变成策略，然后再翻分级。
+这是本提案中最便宜可付诸行动的影子，因为那份发现*就是*修法：`auditTier: restricted` 下的一份影子报告就是一份全拒姿态所需规则的清单。运维可以把那份清单变成策略，然后翻转分级。
 
-两点本模块专属：
+两个模块特定的点：
 
-1. 内置私网 CIDR 拒绝（§4.2）在每一个分级之下都生效，所以它们绝不会作为影子发现出现。今天被拒绝的目标在影子里也是被拒绝的；影子评估上报的是*会发生变化的东西*，而不是本来就成立的东西。
-2. 有状态性（§4.7）同样适用于影子评估。一条影子发现在连接建立时产生一次，而不是每个数据包一次 —— 若非如此，[overview.md](./overview.md) §7.2.7 提到的事件量问题会让这个功能在任何真实工作负载上都不可用。
+1. 有状态性（§4.7）适用于影子评估。一条影子发现在建立时按连接发出一次 —— 或对一条七层规则按请求发出一次 —— 不是按数据包。
+2. `internal.mode` 在每个分级下都是 `deny`（§6），所以一个更严分级的影子不产生 `internal` 发现。想知道收紧 `internal` 要付出什么代价的部署，在一个非生产策略档里把它设成一个更严的值；没有一个分级去影子它。
 
 ## 7. 错误
 
-| 错误码 | HTTP | 载荷 | 时机 |
+| 代码 | HTTP | 载荷 | 何时 |
 | --- | --- | --- | --- |
-| `INVALID_POLICY` | 400 | `{field, reason}` | 条目格式错误（如 `denyOut` 中出现域名、非法 CIDR）。 |
-| `POLICY_NETWORK_LIMIT` | 400 | `{map, got, max}` | 最终唯一条目数超过表上限。 |
-| `POLICY_NETWORK_CONFLICT` | 400 | `{field, legacyField}` | 遗留字段与 `policy.network` 同时出现（§8）。 |
+| `INVALID_POLICY` | 400 | `{field, reason}` | `l4` 与 `l7` 同时出现或同时缺失（§2.1.2）；空 `peer`；入站 `peer` 中的域名（§2.3.2）；`icmp` 带 `ports`；畸形 CIDR、端口或匹配器。 |
+| `POLICY_NETWORK_LIMIT` | 400 | `{map, got, max}` | 某个条目或规则数超过 §4.4 的上限。 |
+| `POLICY_NETWORK_PRIORITY_CONFLICT` | 400 | `{direction, priority, rules, sources}` | 合并后一个方向内两条规则共用一个优先级（§4.5.3）。 |
+| `POLICY_NETWORK_CONFLICT` | 400 | `{field, legacyField?}` | 一个旧字段与对应的结构化字段同时出现（§8）；或一个高优先级来源放宽 `defaultAction` 或 `internal.mode`（§5）。 |
 | `POLICY_NETWORK_SCOPE_CONFLICT` | 400 | `{fields, establishedBy}` | 一个沙箱将被放进另一个沙箱已占据的网络命名空间（§4.9.3）。 |
-| `POLICY_UNSUPPORTED` | 400 | `{field, state, capabilityVersion}` | 在 `enforcement: strict` 之下，策略指名了本部署声明为 `unsupported` 的字段（[overview.md](./overview.md) §8.2.2）。`allowOut` 里的域名条目是最可能处于该状态的字段 —— 见 §11。 |
+| `POLICY_UNSUPPORTED` | 400 | `{field, state, capabilityVersion}` | 在 `enforcement: strict` 下，策略指名了本部署声明为 `unsupported` 的字段。域名条目（§4.3）与 `RegularExpression` 匹配器（§2.4.4）是最可能处于该状态的字段。 |
 
-运行时的出站拒绝**不是** API 错误；与今天一致，它以连接失败的形式呈现给沙箱（被拒 TCP 返回 `ECONNREFUSED` 类 RST，其余丢弃）。在 `onViolation: kill`（§4.8）之下沙箱被终止，且终止状态把该目标与命中的规则记录为原因。
+运行期拒绝**不是** API 错误。四层拒绝以连接失败呈现给沙箱；七层拒绝以 `403` 呈现。在 `onViolation: kill`（§4.8）下沙箱被终止，终态记录目的地与匹配规则为原因。
 
-每一个被拒连接都**必须**在**任何**审计级别下产生一条违规事件，包括 `audit: none`（[overview.md](./overview.md) §8.1.4）：`{sandboxID, destination, port, protocol, rule?, provenance?, outcome: denied|killed, effectivePolicyVersion, shadow: false}`。而 `audit: metadata` 所增加的是对**普通**连接 —— 也就是被放行的那些 —— 的记录，那才是量大的部分，也是一个部署可能合理地不想要的部分。按连接一条事件，而不是按数据包，条件与 §6.1.2 相同。
+每次拒绝**必须**在**每个**审计级别（包括 `audit: none`）发出一个违规事件（[overview.md](./overview.md) §8.1.4）：`{sandboxID, direction, destination, port, protocol, requestLine?, rule?, provenance?, outcome: denied|killed, effectivePolicyVersion, shadow: false}`。`audit: metadata` 所加的是**普通**流量的记录 —— 部署可以合理拒绝的部分。每连接一个事件，或每个被拒七层请求一个。
 
-非致命发现以 `policyWarnings` 数组随创建/更新响应返回。警告绝不改变请求的结果；它只说明所提交策略的某一部分不生效。已定义的警告：被绑定性拒绝遮蔽的 `allowOut` 条目（§4.6.4），以及被更宽的 `allowOut` 条目遮蔽的 `portRule`（§2.1.4）。
+非致命发现在创建/更新响应的 `policyWarnings` 数组中返回。已定义的告警：被绑定拒绝遮蔽的规则（§4.6.4）、`internal.mode: deny` 下不可达的 `sandboxGroup` 对象（§2.3.4），以及 `metadata_endpoint_reachable`（§2.2.3）。
 
-## 8. 兼容性与遗留字段映射
+## 8. 兼容性与旧字段映射
 
-遗留面是永久保留的。每个遗留字段在 API 边界被规范化进策略对象；下游只有唯一一种表示。
+旧字段面是永久的。每个旧字段在 API 边界被归一化进 §2 的结构；下游只有一种表示。
 
-| 遗留字段（请求） | 策略位置 |
+| 旧字段（请求） | 归一化为 |
 | --- | --- |
-| `allow_internet_access`（顶层） | `policy.network.allowInternetAccess` |
-| `network.allow_out` | `policy.network.allowOut` |
-| `network.deny_out` | `policy.network.denyOut` |
-| `network.allow_public_traffic` | `policy.network.ingress.allowPublicTraffic` |
-| `network.mask_request_host` | `policy.network.ingress.maskRequestHost` |
-| `network.rules` | `policy.network.rules` |
+| `allow_internet_access: false` | `egress.defaultAction: deny` |
+| `allow_internet_access: true` | `egress.defaultAction: allow` |
+| `network.allow_out: [t]` | 每条一条出站四层规则：`{action: allow, priority: 40000+n, l4: {protocol: all, peer: {cidrs\|domains: [t]}}}` |
+| `network.deny_out: [t]` | 每条一条出站四层规则：`{action: deny, priority: 30000+n, l4: {protocol: all, peer: {cidrs: [t]}}}` |
+| `network.allow_public_traffic` | `ingress.defaultAction`（`true` → `allow`，`false` → `deny`） |
+| `network.rules` | 出站七层规则，按列表顺序，在 `priority: 20000+n` |
+| `network.mask_request_host` | 一条 `priority: 60000` 的入站七层规则，携带一个 Host 改写过滤器 |
 
-冲突规则：同时包含任一遗留网络字段**和**非空 `policy.network` 的请求**必须**以 `400 POLICY_NETWORK_CONFLICT` 拒绝，并列出冲突字段对。系统**不得**静默选择优先级。
-
-模板合并不受影响：模板的网络配置成为模板级默认策略；请求字段按 §5 合并，方式与今天完全相同。
+1. **保留的优先级带。** 旧字段归一化使用 `20000`–`49999`。一条显式写就的规则**可以**用 `1`–`65535` 内的任何优先级，但一个把显式规则与旧字段混用的部署**应该**待在保留带之外，以免 §4.5.3 冲突在升级时冒出来。
+2. Deny 条目归一化到比 allow 条目更小的数值，这在不改变「优先级决定顺序」这一总规则的前提下，为常见的旧字段配对复现了今天的结果。
+3. 冲突规则：一个既含任何旧网络字段**又**含非空 `policy.network` 的请求**必须**以 `400 POLICY_NETWORK_CONFLICT` 拒绝并列出冲突对。系统**不得**静默地挑一个优先级。
+4. **`internal.mode: deny` 是今天的行为**，所以一个旧请求的私有网段可达性不变：先前是无条件拒绝，现在是一个在生效策略中可见、可由显式动作改变的拒绝。
+5. 模板合并照旧适用：一个模板的网络配置成为模板级默认策略，请求规则按 §5 合并。
 
 ## 9. 验收标准
 
-1. 以遗留字段提供相同取值时，全部既有出站行为测试原样通过。
-2. 对每一种遗留字段组合，通过 `policy.network` 提供等价取值后，产生的生效出站配置（允许/拒绝/L7 路由的可观测行为）完全一致。
-3. 同时包含 `network.allow_out` 与 `policy.network.allowOut` 的请求被 `400 POLICY_NETWORK_CONFLICT` 拒绝。
-4. `denyOut` 含域名被 `400 INVALID_POLICY` 拒绝。
-5. 超限配置被 `POLICY_NETWORK_LIMIT` 拒绝且 `{map, got, max}` 正确。
-6. `allowOut` 条目无法覆盖内置私网 CIDR 拒绝。
-7. 缺省 `policy.network` 且缺省遗留字段 ⇒ 默认策略，与今天无字段时的行为一致。
-8. **绑定性拒绝。** 模板（或策略档）的一条 `denyOut` 加上请求侧针对其覆盖地址的一条 `allowOut` ⇒ 连接被拒绝，且创建响应携带 `policyWarnings` 条目，指明被遮蔽的条目及遮蔽它的来源。
-9. **同源打洞。** **同一**来源贡献的 `denyOut` 与 `allowOut`，其中 allow 被 deny 覆盖 ⇒ 连接被允许（今天的行为保持不变）。
-10. 针对已设 `false` 的模板，请求设置 `allowInternetAccess: true` 被 `400 POLICY_NETWORK_CONFLICT` 拒绝。
-11. **端口限定。** 在 `allowInternetAccess: false` 且仅有一条针对 `10.20.0.5`、`tcp`、`5432` 的 `portRule` 时，到该地址 5432 的连接成功，而 5433 与 UDP 5432 被拒绝。一条指定端口区间的 `portRule` 放行区间内每个端口，且不放行区间之外的任何端口。
-12. **端口规则被遮蔽。** 同时出现在 `allowOut` 与一条更窄 `portRule` 中的目标在所有端口上可达，且创建响应携带指名该规则的 `shadowed_by_allow_out` 警告。
-13. **端口规则不是逃逸口。** 一条指向内置私网 CIDR、或指向被绑定性拒绝关上的地址的 `portRule`，不会打开它。
-14. **受限分级。** `tier: restricted` 且不带任何网络字段，解析为 `allowInternetAccess: false` 与 `ingress.allowPublicTraffic: false`，且生效策略记录这些展开值。某个来源同时设置 `tier: restricted` 与显式 `allowInternetAccess: true` 时，从该来源得到 `true`，但仍受对低优先级来源的只能收窄规则约束。
-15. **有状态性。** 在 `allowInternetAccess: false` 且只有一条指向某个目标的 `allowOut` 条目时，一次到该目标的出站 TCP 连接成功**且能收到其响应**，全程不存在任何反向规则。由 `portRule` 放行的连接同样成立，其回程抵达时源端口是临时端口。同时设置 `ingress.allowPublicTraffic: false` 时，该响应仍然能收到 —— 回程方向不是 ingress（§4.7）。
-16. **影子评估。** 在 `tier: baseline` 配 `auditTier: restricted` 下，一次到未被指名的公网目标的连接**成功**，并产生一条 `shadow: true` 事件，指名该目标以及本来会拒绝它的那个字段。一次到被内置拒绝的私网 CIDR 的连接像今天一样被拒绝，且**不**产生任何影子发现。沙箱内部可观察到的一切，与同一份配置不带 `auditTier` 时毫无差别。影子事件按连接产生一条，而不是按数据包。
-17. **违规动作。** 在 `onViolation: deny`（默认）下，一个被拒连接失败而沙箱继续运行 —— 也就是今天的行为。在 `onViolation: kill` 下，同一个被拒连接终止**沙箱**，且终止状态指名该目标与命中的规则。一个设置 `kill` 的模板不能被请求调软成 `deny`。
-18. **`audit: none` 下违规仍被审计。** 在默认的 `audit: none` 下，一个被拒连接仍然产生一条携带 `shadow: false` 与该目标的违规事件；`audit: none` 压掉的只是被放行连接的记录。事件按连接产生一条。
+1. 当同样的值通过旧字段提供时，每一个既有出站行为测试原样通过。
+2. 对每一种旧字段组合，通过 `policy.network` 提供等价值产生一份完全相同的生效配置。
+3. 一个同时含 `network.allow_out` 与 `policy.network.egress.rules` 的请求以 `400 POLICY_NETWORK_CONFLICT` 拒绝。
+4. **对称性。** 一条入站规则与一条同形状的出站规则都被接受，都带着优先级与来源出现在生效策略中，也都被强制。一条入站规则上的 `peer.domains` 条目以 `400 INVALID_POLICY` 拒绝。
+5. **优先级排序。** 在一条优先级 100 的出站 `deny` 与一条 200 的、覆盖同一目的地、来自同一来源的 `allow` 下，连接被拒。把数值对调则放行。排序不依赖规则在列表中出现的顺序。
+6. **优先级冲突。** 合并后一个方向内两条同优先级的规则以 `400 POLICY_NETWORK_PRIORITY_CONFLICT` 拒绝并指名两条规则及其来源 —— 包括一条来自模板、另一条来自请求时。
+7. **优先级不授予权限。** 一条优先级 60000 的模板 `deny` 规则仍然拒绝一个优先级 1 的请求 `allow` 规则本会放行的连接（§4.6.2），且请求收到被遮蔽规则告警。
+8. **四七层互斥。** 一条同时携带 `l4` 与 `l7` 的规则被拒；一条两者都不带的规则被拒。
+9. **七层隐含连接。** 在 `egress.defaultAction: deny` 与一条针对 `https://api.example.com/v1`（PathPrefix）的 `l7` allow 规则下，到该主机 443 的 TLS 连接被建立，一个 `GET /v1/x` 成功，一个 `GET /other` 收到 `403` 而连接保持。
+10. **七层匹配器。** 在 `method: GET`、`headers: [{Exact, X-Env, prod}]` 与 `queryParams: [{Exact, v, 1}]` 下，只有同时携带两者的 `GET` 匹配；缺其一的请求落到下一条规则。一个 `cookies` 条目匹配从 `Cookie` header 解析出的一个 cookie。
+11. **`internal.mode`。** 在 `deny` 下，即使有一条优先级 1、指名 `10.0.0.5` 的出站 allow 规则，到它的连接也失败。在 `allow` 下，同一连接成功。在带一条指名某对象组的 `allowedPeers` 条目的 `identity` 下，该组中的一个沙箱可达，而同一网段中的任意地址不可达。
+12. **元数据端点告警。** 一份带 `internal.mode: allow` 与一个 `proxy` 暴露密钥绑定的策略被接受并携带 `metadata_endpoint_reachable` 告警。在 `internal.mode: deny` 下，到 `169.254.169.254` 的连接失败。
+13. **有状态性。** 在 `egress.defaultAction: deny`、一条针对某目的地的 allow 规则、以及同时设的 `ingress.defaultAction: deny` 下，一个到该目的地的出站 TCP 连接成功**且其响应被收到**，无入站规则存在（§4.7）。
+14. **restricted 分级。** `tier: restricted` 且无网络字段解析为 `egress.defaultAction: deny`、`ingress.defaultAction: deny`、`internal.mode: deny`，且生效策略记录那些展开值。
+15. **影子评估。** 在 `tier: baseline` 与 `auditTier: restricted` 下，到一个未具名公网目的地的连接**成功**并发出一个 `shadow: true` 事件，指名目的地与本会拒绝它的字段。沙箱内可观测到的一切都不变。每连接一个事件，或每个七层请求一个。
+16. **违规动作。** 在 `onViolation: deny` 下，一个被拒连接失败而沙箱继续运行。在 `kill` 下，同一连接终止**沙箱**，终态指名目的地与匹配规则。一个设 `kill` 的模板不能被请求软化。
+17. **在 `audit: none` 下违规仍被审计。** 一个被拒连接仍发出一个携带 `shadow: false`、方向与目的地的违规事件。
+18. **域名强制是诚实的。** 一个无法保证自己是沙箱唯一解析器的部署把域名条目声明为 `unsupported`，而在 `enforcement: strict` 下一份指名域名的策略以 `400 POLICY_UNSUPPORTED` 拒绝（§4.3.1）。
 
 ## 10. 开放问题
 
-1. **`ingress` 相对其爆炸半径而言规定不足。** `allowPublicTraffic` 与 `maskRequestHost`（§2）无法表达端口、协议、来源约束、认证模式、令牌绑定、到期或吊销 —— 可把一个沙箱暴露到公网是一次能力授予、不是一个网络属性，而它是本模块中最有可能成为事故根因的那一个字段。出站现在有了端口与协议限定（§2.1），而入站两者都没有，这让这处不对称很难辩护。无论它最终成为一个 `endpoint` 模块还是一个被加宽的 `ingress` 对象，其最小语义都是同一套，记录在 [overview.md](./overview.md) §11.18。v1 已经定下的是：除 `compatibility` 之外的每一个分级都关闭公共入站（§6）。
-2. 域名 `denyOut`：今天按设计拒绝。未来是否应规范一种 DNS sinkhole 式拒绝（阻断指定域名的解析）？
-3. IPv6/AAAA 在允许/拒绝与学习中的支持 —— v1 不在范围内；待确认。
-4. **按端口拒绝。** §2.1 只给*允许*面加了端口限定。是否也该有一个按端口限定的 `denyOut`，还是说既然 deny-all 姿态只差一个分级，「指名什么可达」就已经够了？
-5. **速率与可达性。** 带宽是 `resource.quota` 的一个维度，而可达性在本文档（[overview.md](./overview.md) §11.9）。一条 `PortRule` 是否应该能自带速率上限，还是那恰好重现了统一对象存在所要避免的方言问题？
-6. **把流超时做成策略。** §4.7 要求为无连接的流提供一个已文档化的空闲超时，但把取值留给了平台。它是否应该成为一个策略字段？一个持有数千条空闲 UDP 流的工作负载是个资源问题，这支持把它完全排除在 `network` 之外 —— 但一条流过期带来的*可达性*后果落在本文档里。
-7. **身份型目标。** 本规格里的每一个目标都是地址，或会解析到地址。对端组引用（安全组模型）与标签选择器（NetworkPolicy 模型）能在无人书写 CIDR 的前提下表达"这些工作负载之间可以互通"，而这正是多 Agent 场景需要的。跟踪于 [overview.md](./overview.md) §11.11，因为其阻塞性障碍是沙箱之间的流量正跑在 §4.2 无条件拒绝的那些网段上。
-
-   现在就先定下两件事，以免在这个问题悬着的期间，v1 把用户推向一个更差的变通办法。字段名 `peerSelector` 与 `sandboxGroupRef` 被**保留**：使用两者之一的策略**必须**以 `400 POLICY_UNSUPPORTED` 拒绝并指名该字段，而能力集**必须**把它们声明为 `unsupported`（[overview.md](./overview.md) §8.2）而不是干脆不提。「保留并拒绝」优于沉默，因为沉默正是让用户去伸手抓另一个办法的东西 —— 把一个私网 CIDR 手写进 `allowOut`，指望它能打开沙箱间流量。那永远不会成功（§4.2 无条件拒绝那些网段，而任何策略都不得解除），但一个试了这条路却只拿到一个笼统失败的用户什么也学不到；而一个写下 `peerSelector`、被告知该字段尚未支持的用户，恰好学到了缺口在哪里。
+1. **入站认证与暴露。** `ingress` 现在能表达端口、协议、来源与七层匹配器，这关闭了本模块过去承载的大部分不对称。它仍不能表达的是*认证*：令牌绑定、过期、吊销，以及「可达」与「可被一个已认证调用方访问」之间的差别。一个公共 URL 是一次能力授予，把它当作能力授予对待所需的最小语义记在 [overview.md](./overview.md) §11.18。
+2. **响应侧七层规则。** 每个 `l7` 匹配器描述的是一个请求。一条规则是否应能匹配一个**响应** —— 状态、内容类型、大小 —— 以便一份策略能表达「可以调这个 API 但不能从它下载一个可执行文件」？
+3. **优先级分配。** §4.5.3 拒绝冲突，这是安全的，但把优先级分配推给了组合模板与请求的那个人。平台是否应提供一个稀疏分配约定，或一个按来源的 `priorityBase`，使组合不需要协调？
+4. **`internal.mode: identity` 与分组。** `allowedPeers` 预设了一个控制面尚未定义的沙箱分组概念。什么标识一个组、谁可以把一个沙箱加进去、成员身份本身是否是一个策略字段（[overview.md](./overview.md) §11.11）？
+5. **速率与可达性。** 带宽是一个 `resource.quota` 维度而可达性在这里（[overview.md](./overview.md) §11.9）。一条 `NetworkRule` 是否应携带自己的速率上限，还是那会重造这个统一对象存在的意义所要防止的方言问题？
+6. **流超时作为策略。** §4.7 要求无连接流有一个有文档记录的空闲超时，但把值留给平台。它是否应是一个策略字段？
+7. **IPv6。** `peer.cidrs` 在 v1 是 IPv4，而 `internal` 指名的是 IPv4 私有网段。IPv6 需要它自己的网段集（`fc00::/7`、`fe80::/10`，以及某些云暴露的元数据地址）才能被诚实地支持。确认 v1 只支持 IPv4，且一个 IPv6 字面量被拒绝而非被忽略。
 
 ## 11. 非规范性说明
 
-- 既有数据路径（eBPF L3/L4 强制 + L7 代理处理带标记的 HTTP/HTTPS）已满足总览原则 5 对本模块的要求；本规格不要求改变强制执行点。连接跟踪（§4.7）同样是既有路径本来就具备的属性 —— §4.7 是把它作为一项契约文档化，而不是在请求它。
-- **§4.6 的被否决方案：** 无条件地让 `denyOut` 先于 `allowOut` 求值（全局 deny-first 模型）。它是更常见的安全模型，但会改变每一份「在宽泛 deny 上用 allow 打洞」的既有配置的含义，与 §9.1 与 §6 的兼容性承诺相冲突。绑定性拒绝在跨来源方向达成同等的防提权效果，同时让单来源语义逐字节保持不变。
-- **被否决方案 —— 隐式隔离。** Kubernetes NetworkPolicy 只要有任何一份策略选中了目标，就把该目标在对应方向上翻成默认拒绝：写下一条 allow 规则就隐式拒绝了其他一切。这是个有吸引力的属性，因为它让最常见的那个意图（"只到这些目标"）不可能被表达得不完整。此处否决它的理由是：在本对象中，`allowOut` 条目按定义就是加法式的，而且早在本提案之前就是如此；采纳隐式隔离会静默地把每一份「列了几条 allow 条目、同时保留通用互联网访问」的既有配置转成一个 deny-all 沙箱，而那与 §9.1 恰好相反。显式的写法是 `allowInternetAccess: false`，而 `tier: restricted` 让它变成一个字段 —— 抵达同一个目的地，却无需重新解释任何人的既有策略。
-- **实现路径。** 地址与 CIDR 条目、`portRules`、连接状态（§4.7）以及 L7 规则面在两种基质上都是通用件（[overview.md](./overview.md) §12.2）：L3/L4 上的包过滤、conntrack，以及出站路径上的一个代理。**域名条目是例外。** 它们需要把名字解析时刻的学习接进过滤器 —— VM 基质从自己的 DNS 路径获得这件事，而在容器基质上它要么需要一个实现了名字型策略的 CNI，要么需要把流量导过 L7 代理。两者都没有的部署**必须**把域名条目声明为 `unsupported`，而不是解析一次名字然后把地址钉死 —— 那是一条披着域名策略名字的 IP 策略，而 §8.2.1 规则 4 禁止把它上报为强制执行。这是本提案中最大的一处能力差异，而且它恰好落在用户最先会去用的那个字段上。
-- **关于 `kill` 与归因。** §4.8 中沙箱级的 `kill` 不是某一种基质的短板。无论是 tap 设备上的一个 eBPF 程序，还是一条 CNI 数据路径，在连接被拒绝的那一刻都没有可靠的进程上下文；两者都只能靠猜。这个作用域是由强制执行点所在的位置决定的，这也是它在两种基质上相同的原因。
+- **实现路径。** 四层规则、连接状态（§4.7）与优先级排序在两种基质上都是通用件（[overview.md](./overview.md) §12.2）：包过滤、conntrack 与一份有序规则集。有两个面不是。**域名条目**需要把名字解析时的学习接进过滤器，外加对解析器的独占控制（§4.3.1）。**七层匹配器**需要路径上一个终结连接的代理 —— 而对 `https`，那意味着终结 TLS，没有它就只有 SNI 可见，`path`、`headers`、`queryParams` 与 `cookies` 根本无法求值。一个终结 TLS 的部署在那一点以明文读取它租户的流量，这是一个自带合规分量的决定；一个不终结的部署**必须**把那些匹配器声明为 `unsupported`，而不是静默地只按 SNI 匹配。
+- 本模块为 `l7` 规则所需的那个七层代理，正是 [identity.md](./identity.md) §3.1 为 `exposure: proxy` 所需、[resource.md](./resource.md) §14 为 Token 计量所需的同一个组件。一套机制，三个模块 —— 这是先建它的最强论据。
+- **关于沿用 `HTTPRoute` 而非另起炉灶。** §2.4 的匹配器形状刻意就是 Gateway API 的，连 `type` 枚举都是，因为一位写过 `HTTPRoute` 的运维不该为同一件事学第二套语法。两处新增被作为新增陈述：`cookies`（§2.4.3），`HTTPRoute` 把它折进 header；以及 `action: deny`，`HTTPRoute` 没有这个概念，因为一条路由不是一道防火墙。
+- **被拒的替代方案 —— 隐式隔离。** 一个 Kubernetes NetworkPolicy 一旦有任何策略选中它的目标，就把该方向翻成默认拒绝。它很有吸引力，因为它使常见意图无法被不完整地表达。它在此被拒，因为 `defaultAction` 在一处可见的地方显式说了同样的话，而隐式隔离会把每一份在通用互联网访问旁列出几条 allow 条目的既有配置，静默地转成一个全拒沙箱。
+- **被拒的替代方案 —— 两个方向共用一份合并规则列表。** 一份带按规则 `direction` 字段的单一列表更紧凑，也是某些安全组 API 的做法。它在此被拒，因为优先级唯一性（§4.5.3）是按方向的，而一份共享列表要么使该约束全局化 —— 无理由地耦合入站与出站编号 —— 要么要求一个读者必须记住的复合键。
+- **关于 `kill` 与归属。** §4.8 的沙箱级 `kill` 不是某一基质的缺陷。无论是 tap 设备上的一个包过滤器还是一条 CNI 数据路径，在一个连接被拒的那一点都没有可靠的进程上下文；两者都得猜。当强制点是一个共享网关时，该动作还额外是异步的（§4.8.3），这是偏好 `deny` 的第二个理由。

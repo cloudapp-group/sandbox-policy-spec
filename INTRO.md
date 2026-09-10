@@ -8,7 +8,7 @@
 
 **Why it is needed.** A sandbox runs agent-generated, partially trusted code, so its blast radius is not only data exfiltration but credential theft, privilege escalation, runaway loops, and token burn. And a command allowlist does not contain an interpreter it already admitted — the boundary that matters sits *below* the control interface.
 
-**Six modules.** `network` (egress/ingress, stateful), `filesystem` (paths and host mounts), `exec` (a control-interface gate), `process` (privilege, persistence, syscalls), `identity` (which credentials reach the sandbox, and in what form), `resource` (quotas, windowed limits, token accounting).
+**Six modules.** `network` (egress/ingress, stateful), `filesystem` (path-level read/write/execute rules), `exec` (a control-interface gate), `process` (privilege, persistence, syscalls), `identity` (which credentials reach the sandbox, and in what form), `resource` (quotas, windowed limits, token accounting).
 
 
 ## A few examples
@@ -19,9 +19,14 @@ Every policy below validates against the JSON Schema in this repository.
 
 ```yaml
 policy:
-  tier: restricted            # deny-all egress, no public ingress
+  tier: restricted            # deny-all both directions, private network unreachable
   network:
-    allowOut: ["*.pypi.org", "github.com"]
+    egress:
+      rules:
+        - name: pypi
+          priority: 100
+          action: allow
+          l4: { peer: { domains: ["*.pypi.org", "github.com"] } }
   filesystem:
     writableRoots: ["/workspace"]
 ```
@@ -51,8 +56,12 @@ policy:
     runAsNonRoot: true
     allowedCapabilities: ["none"]   # the empty set — the strongest form
   network:
-    portRules:
-      - { name: db, target: 10.20.0.5, protocols: [tcp], ports: ["5432"] }
+    egress:
+      rules:
+        - name: db
+          priority: 100
+          action: allow
+          l4: { protocol: tcp, ports: ["5432"], peer: { cidrs: ["10.20.0.5"] } }
 ```
 
 **The limits are stated too.** Behavioural detection is out of scope for every module here; where a rule cannot be enforced, the spec says so instead of passing off an approximation as enforcement.

@@ -53,7 +53,7 @@ A binding names one credential and states, in one place, what it is for and how 
 - name:        string        # required, unique within the list; used in errors and audit
   secretRef:   string        # required; opaque reference resolved by the platform
   exposure:    proxy | file | env | none   # default: identity.defaultExposure
-  destinations: [string]     # required for exposure: proxy — the allowOut grammar
+  destinations: [string]     # required for exposure: proxy — the network Peer grammar
   methods:     [string]      # optional; subset of HTTP methods
   pathPrefixes: [string]     # optional; request-path prefixes
   ttlSec:      int           # default: 900
@@ -91,10 +91,10 @@ A deployment without such a component MUST declare `exposure: proxy` `unsupporte
 
 A credential under `exposure: proxy` is usable only where the binding says. Without this, `proxy` would merely relocate the secret — the workload could not read it but could still spend it anywhere.
 
-1. `destinations` is REQUIRED for `exposure: proxy` and MUST be non-empty. It uses the `allowOut` target grammar ([network.md](./network.md) §2.1): addresses, CIDRs, DNS names, and leading-`*.` wildcards. An empty or absent `destinations` under `proxy` MUST be rejected with `400 INVALID_POLICY`; a credential attachable to any destination is an unscoped credential wearing a scope's field name.
+1. `destinations` is REQUIRED for `exposure: proxy` and MUST be non-empty. It uses the `Peer` grammar of [network.md](./network.md) §2.3: addresses, CIDRs, DNS names, and leading-`*.` wildcards. An empty or absent `destinations` under `proxy` MUST be rejected with `400 INVALID_POLICY`; a credential attachable to any destination is an unscoped credential wearing a scope's field name.
 2. The platform MUST attach the credential **only** to requests whose destination matches, whose method is in `methods` when set, and whose request path begins with an entry of `pathPrefixes` when set. A request that does not match MUST be forwarded **without** the credential rather than rejected — the workload is entitled to make unauthenticated requests, and rejecting them would make this module a second network policy.
 3. Destination matching MUST be performed on the **resolved connection target**, not on a request header the workload controls. A `Host` header naming an allowed destination on a connection to another address MUST NOT attach the credential. This is the same requirement [exec.md](./exec.md) §3.2 makes for executable resolution, for the same reason.
-4. `destinations` does not widen `network`. A destination permitted here but denied by `network` stays unreachable; the modules intersect. A binding whose destinations are entirely unreachable under the effective network policy MUST be reported as a `policyWarnings` entry `{field: "policy.identity.secrets", name, reason: "destinations_unreachable"}` — an author who believes a credential is in use when nothing can reach its destination should learn it at create time.
+4. `destinations` does not widen `network`. A destination permitted here but denied by `network` stays unreachable; the modules intersect. The converse also holds and is worth stating: `network.internal.mode: allow` makes the cloud metadata endpoint reachable, and a credential obtained from it is one this module never issued and cannot revoke ([network.md](./network.md) §2.2.3). A policy pairing that setting with a `proxy` binding therefore carries the `metadata_endpoint_reachable` warning, because the guarantee in §3.1 holds only for the credentials this module controls. A binding whose destinations are entirely unreachable under the effective network policy MUST be reported as a `policyWarnings` entry `{field: "policy.identity.secrets", name, reason: "destinations_unreachable"}` — an author who believes a credential is in use when nothing can reach its destination should learn it at create time.
 5. Where a credential is short-lived and the platform mints it (§5), the minted credential's own audience MUST be constrained to the binding's destinations where the issuing system supports it. Scope enforced at the token is stronger than scope enforced at the proxy, because it survives the proxy being wrong.
 
 ## 5. Workload identity and lifetime

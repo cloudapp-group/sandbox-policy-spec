@@ -52,7 +52,7 @@
 | 模块 | 现状 | 差距 |
 | --- | --- | --- |
 | 网络 | 出站 L3/L4 允许/拒绝、域名白名单与 DNS 学习、带审计与头部注入的 L7 HTTP/HTTPS 规则、公开入站门控。 | 字段散落在创建请求各处；入站只有一个开关；没有可复用的策略对象；各模块之间没有统一的合并语义。 |
-| 文件系统 | 宿主挂载前缀白名单与挂载级 `readOnly`。 | 对沙箱**内部**敏感路径（`~/.ssh`、`~/.aws/credentials`、`/etc/shadow`）零保护；没有路径级只读/禁读策略；前缀白名单不属于面向用户的策略 API。 |
+| 文件系统 | 无面向用户的字段。哪些宿主路径可挂载是部署在本对象之外已经做出的准入决定（[filesystem.md](./filesystem.md) §1）。 | 对沙箱**内部**敏感路径（`~/.ssh`、`~/.aws/credentials`、`/etc/shadow`）零保护；没有任何路径级只读/禁读策略。 |
 | 命令执行 | 每请求级 `timeout`、`user`、`cwd`。 | 没有沙箱级策略：没有命令允许/拒绝列表、没有用户限制、没有并发上限、没有总时长上限、没有审计轨迹。 |
 | 进程 | 面向用户的能力为零。沙箱之间的进程与 PID 隔离是基质的**属性**（§12.3），不是策略能声明的东西。 | 完全没有策略面：提权、持久化与系统调用暴露面都无法被声明式地约束 —— 尽管强制执行机制早已存在于 API 之下，[filesystem.md](./filesystem.md) §11 已经在设想"等效的系统调用级强制执行"。 |
 | 身份 | 什么都没有。凭据以环境变量或文件的形式抵达沙箱，而沙箱内任何代码都能读到它们。 | 没有任何策略面：没有工作负载身份、没有目的地绑定的注入、没有暴露模式、没有 TTL 或吊销。§2.3 的纵深防御矩阵已经承认 `denyPaths` 保护不了已在进程内存里、或经环境变量传入的秘密 —— 而那正是秘密今天所在的地方。 |
@@ -76,7 +76,7 @@
 | 模块 | 主要应对的威胁 | 强制执行面 | **不**覆盖 |
 | --- | --- | --- | --- |
 | **网络** | 数据外泄；触及内部服务与元数据端点 | 离开沙箱的每一个包，无论由哪个进程发出 | 代码在本地做了什么；已经从允许通道流出的数据 |
-| **文件系统** | 沙箱内凭据窃取；宿主挂载滥用 | **所有**进程的每一次文件系统访问 | 已进入进程内存或以环境变量传入的凭据 |
+| **文件系统** | 沙箱内凭据窃取；对沙箱能在磁盘上触及之物（无论是否挂载）的滥用 | **所有**进程的每一次文件系统访问 | 已进入进程内存或以环境变量传入的凭据；以及那些宿主路径当初是否被挂载进来 |
 | **资源** | 失控循环、Token 烧钱、吵邻效应 | 内核记账 + 出站 HTTP 计量，按沙箱统计 | 有害但很便宜的行为 |
 | **进程** | 工作负载**自行**启动的进程的提权、非预期持久化、系统调用面滥用 | 沙箱运行的每一个进程，在内核边界上 | 进程在已获授权范围内的正当行为 |
 | **身份** | 沙箱内代码对长期凭据的窃取与复用 | 沙箱之外的凭据签发与出站代理路径 | 一个工作负载在其作用域内正当使用过的凭据，在该作用域存续期间 |
@@ -210,12 +210,12 @@ GET /policies/{id}/revisions/{rev}          单份不可变策略档修订
 | `tierVersion` | 最新被 pin 的版本胜出。由于新版分级只能收紧其展开内容（§7.1.7），最新也就是最严格。 |
 | `auditTier` | 最严格的 `auditTier` 胜出，并以合并后的 `tier` 为比较基准（§7.2）。影子评估只是观察得更多；它从不强制，所以放宽它不可能放宽边界。 |
 | 标量字段 | 高优先级的显式值覆盖低优先级；缺省保持低优先级值。 |
-| 列表字段（`allowOut`、`denyPaths` 等） | 高优先级条目追加到低优先级条目之后，再去重。 |
-| 规则列表（`rules`、exec 命令规则） | 高优先级规则排在低优先级规则**之前**；求值为首匹配生效。 |
+| 列表字段（`denyPaths`、`allowedSyscalls` 等） | 高优先级条目追加到低优先级条目之后，再去重。 |
+| 规则列表（`network.egress.rules`、`network.ingress.rules`） | 规则跨来源追加，并按显式 `priority` 顺序求值，而非按来源顺序（[network.md](./network.md) §4.5）。优先级为规则排序；它从不授予权限（同文档 §4.5.4）。 |
 | 模式字段（`exec.mode`、`filesystem.mode`、`process.mode`、`process.syscall.mode`） | 最严格者胜出。 |
 | 违规动作（`onViolation`、`onExceeded`） | 最严重的动作胜出（§8.1.7、[resource.md](./resource.md) §10）。 |
 | `enforcement` | `strict` 胜出。低优先级的 `strict` **不得**被降级为 `bestEffort`（§8.2.2 规则 2），此类尝试被拒绝而不是被遮蔽。 |
-| **只能收窄的限制** | 低优先级来源贡献的限制，**不得**被高优先级来源移除、覆盖或打洞。高优先级可以收窄边界，但永远不能放宽它。各模块规格逐一列出受本规则约束的字段 —— 网络的绑定性拒绝与 `allowInternetAccess`、`exec.allowedUsers`、`filesystem.mounts.allowedHostPrefixes` 与 `filesystem.baselineExceptions`、`process.noNewPrivileges` 与 `process.allowedCapabilities`、`resource.limits`。唯一且有界的例外是限时授权（§5.1）。 |
+| **只能收窄的限制** | 低优先级来源贡献的限制，**不得**被高优先级来源移除、覆盖或打洞。高优先级可以收窄边界，但永远不能放宽它。各模块规格逐一列出受本规则约束的字段 —— 网络的绑定性拒绝、`network.internal.mode` 与两个 `defaultAction` 字段、`exec.allowedUsers`、`filesystem.baselineExceptions`、`process.noNewPrivileges` 与 `process.allowedCapabilities`、`resource.limits`。唯一且有界的例外是限时授权（§5.1）。 |
 
 当高优先级来源申请了只能收窄规则所禁止的事情，模块规格**必须**指定两种结果之一，而绝不允许静默的第三种：拒绝请求（`400`，用于直接矛盾，如把一个布尔值翻回去），或接受请求并在响应的 `policyWarnings` 数组中报告不生效的部分（用于仅被遮蔽的条目）。
 
@@ -262,7 +262,7 @@ DELETE /sandboxes/{id}/grants/{grantID}    提前撤销
 
 | 主体 | 是什么 |
 | --- | --- |
-| **运维方（operator）** | 运行平台的一方。设置部署级的兜底约束，如宿主挂载白名单（[filesystem.md](./filesystem.md) §4.4.4）与最大授权 TTL。 |
+| **运维方（operator）** | 运行平台的一方。设置部署级的兜底约束，如最大授权 TTL，以及那些完全位于本对象之外的准入决定 —— 哪些宿主路径可挂载即在其中（[filesystem.md](./filesystem.md) §1）。 |
 | **租户管理员** | 拥有一个租户或命名空间。在其范围内管理策略档。 |
 | **模板发布者** | 发布携带默认策略的模板。 |
 | **沙箱调用方** | 创建沙箱，提供内联策略与 `policyID`。 |
@@ -311,8 +311,8 @@ DELETE /sandboxes/{id}/grants/{grantID}    提前撤销
 
 | 模块 | 默认值（`restricted`） | 退出方式 |
 | --- | --- | --- |
-| 网络 | 全拒出站、无公共入站：只有具名的 `allowOut`、`portRules` 与 L7 目标能通过。 | `allowInternetAccess: true`、`ingress.allowPublicTraffic: true`，或 `tier: baseline`。 |
-| 文件系统 | 拒绝敏感凭据路径 —— 带版本的基线集合 `baseline/1`（`~/.ssh`、`~/.aws`、`~/.gnupg`、`/etc/shadow` 等）；挂载以只读到达。 | `mode: unrestricted`、为具名路径设 `baselineExceptions`，或 `mounts.defaultReadOnly: false`。 |
+| 网络 | 两个方向都全拒，且私有网络不可达：只有具名规则能通过。 | `egress.defaultAction: allow`、`ingress.defaultAction: allow`、`internal.mode`，或 `tier: baseline`。 |
+| 文件系统 | 拒绝敏感凭据路径 —— 带版本的基线集合 `baseline/1`（`~/.ssh`、`~/.aws`、`~/.gnupg`、`/etc/shadow` 等）。 | `mode: unrestricted`，或为具名路径设 `baselineExceptions`。 |
 | 命令执行 | `unrestricted` 模式 + 总时长超时上限，外加 metadata 审计。 | `allowlist` 模式更严；`audit: none` 是审计轨迹的退出方式。 |
 | 进程 | 拒绝与逃逸相邻的系统调用（`syscall/1`）、不许提权、不许以 root 运行、不许后台化。 | `noNewPrivileges: false`、`runAsNonRoot: false`、`allowDaemonize: true`，或 `mode: unrestricted`。 |
 | 身份 | 没有任何秘密以沙箱内代码可读的形式抵达沙箱（[identity.md](./identity.md) §6）。 | 为每个秘密显式指定 `exposure` 模式。 |
@@ -346,20 +346,20 @@ policy:
 
 | 模块 | `tier: compatibility` | `tier: baseline` | `tier: restricted` |
 | --- | --- | --- | --- |
-| 网络 | `allowInternetAccess: true`、`ingress.allowPublicTraffic: true`，内置私网 CIDR 拒绝 | `allowInternetAccess: true`、`ingress.allowPublicTraffic: false` | `allowInternetAccess: false`（全拒出站；只有显式 `allowOut`、端口/协议规则与 L7 目标能通过）、`ingress.allowPublicTraffic: false` |
-| 文件系统 | `mode: baseline`、`baseline/1` | `mode: baseline`、`baseline/1` | `mode: baseline`、`mounts.defaultReadOnly: true` |
+| 网络 | `egress.defaultAction: allow`、`ingress.defaultAction: allow`、`internal.mode: deny` | `egress.defaultAction: allow`、`ingress.defaultAction: deny`、`internal.mode: deny` | `egress.defaultAction: deny`、`ingress.defaultAction: deny`、`internal.mode: deny` |
+| 文件系统 | `mode: baseline`、`baseline/1` | `mode: baseline`、`baseline/1` | `mode: baseline`、`baseline/1`、`audit: metadata` |
 | 命令执行 | `mode: unrestricted`、`maxTimeoutSec: 3600` | `mode: unrestricted`、`maxTimeoutSec: 3600` | `mode: unrestricted`、`maxTimeoutSec: 3600`、`audit: metadata` |
 | 进程 | `mode: baseline`、`syscall.mode: baseline` | `mode: baseline`、`syscall.mode: baseline` | `mode: baseline`、`syscall.mode: baseline`、`noNewPrivileges: true`、`runAsNonRoot: true`、`allowDaemonize: false`、`audit: metadata` |
 | 身份 | `mode: unrestricted` | `mode: managed` | `mode: managed`、`defaultExposure: proxy` |
 | 资源 | 模板配额、无按窗口限额 | 模板配额、无按窗口限额 | 模板配额、`onExceeded: hold` |
 
-`tier: unrestricted` 展开为各模块已文档化的退出方式 —— `network.allowInternetAccess: true` 且不追加内置拒绝之外的任何拒绝（内置拒绝是任何分级都无法解除的）、`filesystem.mode: unrestricted`、`exec.mode: unrestricted`、`process.mode: unrestricted`、`identity.mode: unrestricted`。它是给可信、人类编写的工作负载用的分级，且它的每一次使用都可见于生效策略及其快照。
+`tier: unrestricted` 展开为各模块已文档化的退出方式 —— `network.egress.defaultAction: allow` 与 `ingress.defaultAction: allow` 且不追加任何拒绝、`filesystem.mode: unrestricted`、`exec.mode: unrestricted`、`process.mode: unrestricted`、`identity.mode: unrestricted`。它**不**放宽 `network.internal.mode`，后者在每个分级下都是 `deny`（[network.md](./network.md) §6）：访问私有网络是一个关于部署拓扑的陈述，没有一个分级能替它做出。它是给可信、人类编写的工作负载用的分级，且它的每一次使用都可见于生效策略及其快照。
 
 **排序。** 由最严到最宽：`restricted` > `baseline` > `compatibility` > `unrestricted`。合并时最严格的分级胜出（§5）。`compatibility` 位于 `baseline` **之下**，因为它是唯一一个把公共入站留着开的分级。
 
 有三个推论值得直说，而不是留给日后发现：
 
-- **`restricted` 不收窄 `exec.mode`，这是刻意的。** `allowlist` 要求 `allowedCommands` 非空（[exec.md](./exec.md) §5），因此一个选择了它的分级会让单独写 `tier: restricted` 直接校验失败 —— 一个字段的承诺，被这一个字段自己打破。更深的理由是它换不到东西：`exec` 是控制接口门禁，不是围堵边界，而一个放行了解释器的白名单几乎什么都没有约束住（[exec.md](./exec.md) §3.6）。`restricted` 真正约束的东西在 `network`、`filesystem`、`process` 与 `identity` 里，它们在控制接口之下强制执行。分级打开的是 `exec` 审计，因为这是它无需臆测调用方命令清单就能提供的部分。同样的克制适用于任何分级不得不猜测工作负载专属数值的地方：`filesystem.writableRoots`（[filesystem.md](./filesystem.md) §6.5）与全部 `resource` 预算（[resource.md](./resource.md) §6）都因此被留在原样。会猜的分级，就是会为了一个它并未改善的安全姿态而弄坏工作负载的分级。
+- **`restricted` 不收窄 `exec.mode`，这是刻意的。** `allowlist` 要求 `allowedCommands` 非空（[exec.md](./exec.md) §5），因此一个选择了它的分级会让单独写 `tier: restricted` 直接校验失败 —— 一个字段的承诺，被这一个字段自己打破。更深的理由是它换不到东西：`exec` 是控制接口门禁，不是围堵边界，而一个放行了解释器的白名单几乎什么都没有约束住（[exec.md](./exec.md) §3.5）。`restricted` 真正约束的东西在 `network`、`filesystem`、`process` 与 `identity` 里，它们在控制接口之下强制执行。分级打开的是 `exec` 审计，因为这是它无需臆测调用方命令清单就能提供的部分。同样的克制适用于任何分级不得不猜测工作负载专属数值的地方：`filesystem.writableRoots`（[filesystem.md](./filesystem.md) §6.5）与全部 `resource` 预算（[resource.md](./resource.md) §6）都因此被留在原样。会猜的分级，就是会为了一个它并未改善的安全姿态而弄坏工作负载的分级。
 - 分级取值 `baseline` 与 `unrestricted` 刻意复用了 `filesystem.mode`、`exec.mode`、`process.mode` 用的同一批词。它们处在不同层级、做不同的事：分级是策略级的、只选择默认值，而模块 `mode` 是模块字段、会被强制执行。两者同时出现时适用规则 3 —— 显式的模块字段胜出。
 - **`compatibility` 可以被显式选到，而这是有意的。** 它为遗留路径而存在（§7），但一个正在迁移到 `policy` 的调用方，可能需要一个发布周期停在今天的行为上再收紧。写 `tier: compatibility` 就能得到它；而与旧的那个静默默认值不同，它会出现在生效策略里、快照里、审计轨迹里 —— 于是「这批 fleet 还停在宽松档上」成了一次查询，而不是一个假设。
 
@@ -438,7 +438,7 @@ policy:
 
 | 模块 | `deny` 呈现为 | `kill` 终止 | 为何是那个粒度 |
 | --- | --- | --- | --- |
-| **network** | 连接失败（TCP reset / 丢包） | **沙箱** | L3/L4 强制执行看到的是数据包，不是进程身份。在那一层把一个连接归因到某个进程是不可靠的，而一次尽力而为的归因会杀错进程 —— 那比不杀更糟。 |
+| **network** | 连接失败（TCP reset / 丢包），或被拒 L7 请求收到 `403` | **沙箱** | L4 强制执行看到的是数据包，不是进程身份。在那一层把一个连接归因到某个进程是不可靠的，而一次尽力而为的归因会杀错进程 —— 那比不杀更糟。当强制点是一个共享网关时，终止还额外是异步的（[network.md](./network.md) §4.8.3）。 |
 | **filesystem** | `EACCES` / `EROFS` | 那个违规**进程** | 强制执行点位于系统调用/VFS 路径上，它精确地知道自己的调用者。 |
 | **process** | `EPERM` / OS 级失败 | 那个违规**进程** | 同上。 |
 | **exec** | `POLICY_EXEC_DENIED`（`400`） | *不适用* —— 见 §8.1.6 | |
@@ -590,9 +590,9 @@ policy:
 | 阶段 | 范围 |
 | --- | --- |
 | **0** | 本提案集在跟踪 Issue 中评审；开放问题逐项收敛为决策。 |
-| **1** | `SandboxPolicy` API 模型；遗留字段规范化；`policy.network` 端到端；冲突检测；生效策略的版本化与快照（§4.1）；违规响应模型及其常开的违规事件（§8.1）；能力集、`GET /capabilities`、`policy.enforcement` 与失效字段上报（§8.2）；并发控制与 `status`（§4.2、§4.3）；主体与权限矩阵（§5.2）；机器可读 schema 与合规性套件（§11.16）；SDK `policy=`。 |
+| **1** | `SandboxPolicy` API 模型；遗留字段规范化；`policy.network` 端到端 —— 两个方向、优先级排序、四层规则与 `internal.mode`；冲突检测；生效策略的版本化与快照（§4.1）；违规响应模型及其常开的违规事件（§8.1）；能力集、`GET /capabilities`、`policy.enforcement` 与失效字段上报（§8.2）；并发控制与 `status`（§4.2、§4.3）；主体与权限矩阵（§5.2）；机器可读 schema 与合规性套件（§11.16）；SDK `policy=`。 |
 | **2** | 资源域：配额合并、按窗口限额（`minute`–`month` + `lifetime`）、`onExceeded` 动作（`warn`/`pause`/`hold`/`kill`）、通知与 webhook、hold 审批 API、用量暴露。 |
-| **3** | 文件系统：基线敏感路径保护、`readOnlyPaths` / `denyPaths` / `writableRoots`、宿主挂载策略面。 |
+| **3** | 文件系统：基线敏感路径保护、`readOnlyPaths` / `denyPaths` / `writableRoots`。 |
 | **4** | 命令执行：模式、用户限制、超时上限、并发、审计、带类型的拒绝。 |
 | **5** | 策略档（`/policies`）、策略档修订、`policyID` 绑定、支持模块的热更新、LLM Token 计量。 |
 | **6** | 策略分级（`policy.tier`）：`baseline` / `restricted` / `unrestricted` 展开、来源标记继承、带版本的展开内容（`tierVersion`，§7.1.7）、分级记录进生效策略与快照。影子评估（`policy.auditTier`，§7.2）：字段本身、它的校验、`shadow: true` 事件模式，以及到此阶段为止已发布的每个模块的支持。 |
@@ -613,14 +613,14 @@ policy:
 8. **任务级策略。** 需求方要求按 Agent、按任务的策略，而本文档定义的最小作用域是沙箱。任务是否是一等作用域，带自己的生效策略与审计身份；还是说"按任务授权"恰好就是 §5.1 的授权已经提供的东西？若是前者，什么东西在控制面上标识一个任务？
 9. **可达性与消耗量。** 出站端口/协议规则在 `network`，带宽在 `resource.quota`。这条缝（可以访问什么 vs 可以消耗多少）划得对吗，还是用户应该能在一处写出"到这个 CIDR 的 443，最多 10 Mbit/s"？
 10. **组合策略档。** 一个沙箱最多引用一份策略档（§4）。云安全组是可组合的 —— 一台实例挂载多个，生效规则集是它们的组合 —— 这就是"基础锁定"与"可访问 GitHub"能够保持为各自独立、可复用的对象，而不必被复制进每一份两者都需要的策略档的原因。沙箱是否应该能引用多份策略档？合并规则必须写得很小心，因为多份策略档是**对等的**、彼此之间没有优先级：allow 类列表会取并集，deny 类列表会取并集且其中每一条都是绑定性的（[network.md](./network.md) §4.6），mode 与标量取最严格的值，而交集类字段（`allowedCapabilities`、`syscall.allowedSyscalls`、`baselineExceptions`）取交集。注意这刻意**不是**安全组的规则 —— 安全组对 allow 取并集且完全没有 deny；在这里对对等来源的 allow 取并集会让一份宽松的策略档放宽一份严格的策略档，而这是 §5 所禁止的。
-11. **身份型出站目标。** 本提案里每一个出站目标都是地址、CIDR，或一个会解析到地址的名字（[network.md](./network.md) §2.1）。安全组可以改为把**另一个安全组**指定为对端，Kubernetes NetworkPolicy 可以按标签选择 Pod —— 身份型微隔离，它能在地址被重新分配后依然成立，也能在无人书写 CIDR 的前提下表达"这些工作负载之间可以互通"。多 Agent 场景要的正是这个：两个沙箱协作完成一个任务。有两道障碍必须先清除。一是没有一个沙箱分组概念可供指向；二是沙箱之间的流量正跑在 [network.md](./network.md) §4.2 无条件拒绝、并写着"用户策略**不得**允许这些网段"的那些网段上 —— 因此支持它需要一个由平台解析、用户无法手写的例外，而这将是本提案中唯一一处让一条无条件拒绝出现口子的地方。值得做，但不值得草率地做。
+11. **身份型出站目标 —— 部分解决。** [network.md](./network.md) §2.2 现在定义了带 `allowedPeers` 列表的 `internal.mode: identity`，而 §2.3 给一条四层规则一个 `sandboxGroup` 对象，所以基于身份的可达性的*语法*已经存在，而过去挡住它的那条无条件私网拒绝也已消失。仍未解决的是名字背后的一切：控制面里仍没有一个沙箱分组概念，所以没有东西定义一个组是什么、谁可以把一个沙箱加进去、成员身份本身是否是一个策略字段。在那存在之前，`identity` 模式是一个其对象无法被解析的字段。这个问题原来的提法 —— 每个出站目标都是一个地址、一个 CIDR，或一个解析到其一的名字 ——
 12. **模拟一份候选策略。** §7.2 影子的是一个**分级**，这是刻意的，因为分级是单个取值加一份已发布的展开内容。它不回答"我正要写的这份策略会产生什么效果" —— 也就是安全组的 `DryRun` 与可达性分析器所回答的那个问题。当五个模块、分级展开、来源标记、绑定性拒绝、遮蔽警告与限时授权全部叠加在一起时，作者除了真去创建一个沙箱，无法预判生效结果。是否应该提供只读的 `POST /policies:simulate`（返回完整展开后的生效策略）与 `POST /sandboxes/{id}/policy:explain`（针对一个假设的操作返回判定、命中规则与贡献来源）？两者都是只读且不改变任何语义的，这让它成为一个范围问题而不是风险问题。
 13. **反复违规的升级。** §8.1 给每一次违规一个独立的判定：第一百次尝试读 `~/.aws/credentials`，得到的回答与第一次一模一样。而重复是可得的最强信号之一 —— 一个正当的工作负载不会在循环里重试一个凭据路径 —— 可策略对象里现在没有任何地方能表达"这种事发生 N 次之后，就别客气了"。字段的形状大致会是 `onRepeatedViolation: {count, withinSec, action}`。有两条反对意见把它挡在 v1 之外。阈值是一个没人能事先选对的值，而这正是 §7.1 拒绝为 `writableRoots` 与全部 `resource` 预算走进去的同一个陷阱；而"这种行为模式是一次攻击"是一个通过长期观察行为才能得出的判断，而 §2.3.1 把这类判断放在本提案每一个模块之外。因此自洽的立场是：审计流承载这些重复，而由检测子系统通过更新策略来升级 —— 那次更新像任何其他变更一样被版本化并快照。需要决定的是，这层间接是否可以接受，还是说"反复违规升级"恰好是那唯一一个足够廉价、足够无歧义、因而终究该进策略对象的行为判断。
 14. **同一沙箱内需要不同姿态的容器。** §12.1 把容器基质上的沙箱单位定为一个 Pod，这让 `policy.network` 恰好落在沙箱自己的作用域上，并消除了按容器为单位所造成的归属问题。它是把张力挪了位置，而不是化解了它：`securityContext` 是按容器的，于是一份 `policy.process` 和一份 `policy.filesystem` 会展开到该 Pod 内的每一个容器上，而工作负载旁边的 mesh 代理或遥测 agent 合理地需要比工作负载更宽的姿态 —— 一个要编程数据路径的代理需要 `NET_ADMIN`，而它旁边那份由 agent 生成的代码要的是 `allowedCapabilities: ["none"]`。把工作负载的策略施加到 sidecar 上会让 sidecar 起不来；把 sidecar 的策略施加到工作负载上是 §5 所禁止的静默放宽。有三条出路。**只在声明为工作负载的容器上展开**，把平台注入的容器留在沙箱策略之外，并要求能力集说明这一点 —— 这站得住，因为 sidecar 是部署方自己选择并信任的组件，而策略对象存在的意义是围堵它*不*信任的代码；但它把 sidecar 留成了一片不受约束的攻击面，而那片攻击面与工作负载共享网络命名空间、可能还共享卷。**允许按容器覆盖**，这是诚实的，但重新引入了第二条合并轴与第二样要审计的东西。**在 `tier: restricted` 的沙箱上彻底禁止同处容器**，这可强制执行，却排除了许多集群强制要求的 mesh 部署形态。无论选哪一条，答案都**必须**说明一份已解析的策略管辖哪些容器，因为一份主体不明的策略不是边界。这不能带过阶段 1。
 15. **规范性依赖尚未自包含 —— 发布阻塞项。** [network.md](./network.md) §1 以*引用并入*的方式纳入既有出站语法、L7 规则语法、DNS 学习行为与当前入站语义，而它所用的仓库相对路径解析到本仓库之外。因此一个只读本仓库的第三方无法实现域名条目、DNS 学习或 L7 规则面：那处引用点了它们的名字，却没有定义它们。这不是一个设计问题，而是一个打包缺陷，且它**必须**在本文档集作为可实现规范对外提供之前被关闭。两种可接受的解决方式：把被引用的材料作为带版本的 bundle 发布进本仓库，或把每处引用提升为不可变的公开 URL 并记录其版本与 SHA-256。无论选哪种，任何被「引用并入」的内容都**必须**与此处正文同等地参与合规性（§11.16）—— 一个在测试套件之外的依赖，是一个没人验证过的依赖。
 16. **机器可读 schema 与合规性套件 —— 发布阻塞项。** 本文档集约有 2,500 行散文，描述合并顺序、来源标记、分级展开、授权上限、能力状态、警告与错误载荷。验收标准散落在各模块规格中，而没有任何东西阻止两个看起来都正确的实现把同一份 YAML 解析成不同的生效策略。在被采纳之前必需：一份 `SandboxPolicy` JSON Schema、规范化序列化规则（§4.3.3 已经依赖它来算策略哈希）、一份字段弃用策略，以及一套与适配器无关的合规性套件 —— 其 fixture 以 `{各来源, 能力集, 时钟}` 为输入、以 `{生效策略, 判定, 审计事件}` 为输出。该套件**必须**至少覆盖：来源合并、绑定性拒绝、授权的签发与到期、两种 `enforcement` 取值下的 `unsupported` 字段、分级展开的 pin、快照与恢复（§8.3），以及 §4.2 的并发更新场景。
 17. **应急突破（break-glass）访问。** §5.2 定义了谁可以做什么，并刻意省略了运维方在事故中如何绕过它。每个部署都会需要这样一条路径，而一条未被规定的路径往往会变成一条未被记录的路径。需要决定的是：break-glass 是否是一个带自己审计类别的独立主体、是否要求双人授权、是否像授权那样限时（§5.1），以及一个被它触碰过的沙箱是否在其余生中都被标记。
-18. **入站与镜像相对其爆炸半径而言规定不足。** 此处点名这两个面而不是让它们隐而不宣，因为两者都是承重的，而两者都没有被充分覆盖。**入站：** `ingress.allowPublicTraffic` 与 `maskRequestHost`（[network.md](./network.md) §2）无法表达端口、协议、来源约束、认证模式、令牌绑定、到期或吊销 —— 可把一个沙箱暴露到公网是一次能力授予，不是一个网络属性。**镜像：** `process`、`filesystem` 与 `identity` 中的每一条规则都在一个本对象只字未提的镜像里执行；一个可变 tag 或一个未签名的 registry，能在不违反任何一个策略字段的情况下抵消运行期的强制。两者若各自成为模块，其最小语义分别是：入站需要协议/端口、来源约束、认证模式、身份绑定、到期、吊销，以及一个绝不作为默认值的 `public` 标记；镜像需要不可变 digest、允许的 registry、签名或 attestation 状态，以及 `process` 规则将施加于其上的启动 UID。
+18. **入站认证与镜像相对其爆炸半径而言规定不足。****入站：** 结构性的那一半现在关闭了 —— [network.md](./network.md) §2.1 给了入站与出站相同的规则形状，带端口、协议、来源对象、优先级与七层匹配器。仍缺的是*认证*：令牌绑定、到期、吊销，以及「可达」与「可被一个已认证调用方访问」之间的差别。一个公共 URL 是一次能力授予，不是一个网络属性，而使它成为能力授予的那些字段还都不存在。
 
 ## 12. 运行基质与非规范性说明
 
@@ -652,8 +652,8 @@ policy:
 | `process.runAsNonRoot` | 启动时的解析 uid 检查，加上拒绝 `setuid(0)` |
 | `resource.quota`、`resource.limits` | cgroup 计量与限额 |
 | `network` 连接状态（§4.7） | 数据路径中的连接跟踪 |
-| `network.allowOut` / `denyOut` 的地址与 CIDR 条目 | L3/L4 上的包过滤 |
-| `network.rules`（L7） | 出站路径上的 HTTP/HTTPS 代理 |
+| `network` 四层规则用于地址与 CIDR | 在 L3/L4 按优先级顺序做包过滤 |
+| `network` 七层规则 | 路径上的 HTTP/HTTPS 代理，对 `https` 终结 TLS |
 
 **VM 基质上的信任前提，之所以写出来，是因为把它弄错会让原则 5 反转。** 当一个沙箱独占自己的内核时，上面那些机制是在*那个*内核**内部**、由一个与工作负载共享该内核的 supervisor 进程施加的。于是 supervisor 与它所约束的代码处在同一个信任域里，而容器基质的安排并非如此：在那里，同样这些机制由**宿主**内核施加，而容器内的 root 并不是强制执行之上的 root。
 
@@ -667,7 +667,7 @@ VM 基质上无法同时满足这两条的部署，**必须**在它所声明的�
 有两个面确实不同，而这两个正是一份能力集必须诚实对待的：
 
 1. **路径级文件系统策略**（`denyPaths`、`readOnlyPaths`、`writableRoots`）。在 VM 基质上，一个客户机内、带按进程规则集的 LSM 直接覆盖它。在容器基质上，等价物是内核提供的非特权按进程路径规则集接口（若有），或在没有该接口时由宿主管理、按沙箱生成的 LSM profile —— 后者需要策略对象无法强制要求的节点级配合。两者都不可用时，该字段是 `unsupported`，而一个只读 bind mount **不是**它的可接受替代品（§8.2.1 规则 4）。
-2. **基于域名的出站**（`allowOut` 的域名条目及其 DNS 学习）。在 VM 基质上这是一个由 DNS 学习喂养的包过滤器。在容器基质上，原生网络策略原语选择的是地址与标签、不是名字，因此域名支持要么需要一个实现了名字型策略的 CNI，要么需要出站路径上本已存在的那个 L7 代理。两者都没有的部署把域名条目声明为 `unsupported`；在创建时解析一次名字并把地址钉死，是另一条规则，而不是一条部分实现的规则。
+2. **基于域名的出站**（`peer.domains` 条目及其 DNS 学习）。在 VM 基质上这是一个由 DNS 学习喂养的包过滤器。在容器基质上，原生网络策略原语选择的是地址与标签、不是名字，因此域名支持要么需要一个实现了名字型策略的 CNI，要么需要出站路径上本已存在的那个 L7 代理。两者都没有的部署把域名条目声明为 `unsupported`；在创建时解析一次名字并把地址钉死，是另一条规则，而不是一条部分实现的规则。
 
 `process` 在两种基质上都负担得起，而本文档的一个早期版本对原因的说法是错的。seccomp 式过滤器是**按进程**的，所以在共享内核上收窄一个沙箱的系统调用面，与在独占内核上一样，都不可能波及邻居。独占内核多出来的不是过滤的能力，而是在*可以过滤什么*上的自由度：共享内核会把平台在宿主级设置上约束到"该节点上每个租户都能容忍"的交集，而按进程的过滤器仍然完全可用。这个区分之所以重要，是因为把它夸大，正是一份规格如何获得一项它其实并不需要的基质要求。
 

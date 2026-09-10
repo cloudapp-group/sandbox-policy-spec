@@ -9,12 +9,14 @@ given:
     request:
       policy:
         network:
-          allowOut: ["*.example.com"]     # a domain entry
+          egress:
+            rules:
+              - {name: api, priority: 100, action: allow, l4: {peer: {domains: ["*.example.com"]}}}   # a domain peer
   capabilities:
     version: cap/1
     default: enforced
     fields:
-      "network.allowOut.domain":
+      "network.egress.rules.l4.peer.domains":
         state: unsupported
         reason: "no name-based CNI policy and no L7 proxy in the egress path"
   clock: "2026-09-06T00:00:00Z"
@@ -23,7 +25,7 @@ expect:
     status: 400
     code: POLICY_UNSUPPORTED
     payload:
-      field: network.allowOut.domain
+      field: network.egress.rules.l4.peer.domains
       state: unsupported
       capabilityVersion: cap/1
 ---
@@ -39,12 +41,14 @@ given:
       policy:
         enforcement: bestEffort
         network:
-          allowOut: ["*.example.com"]
+          egress:
+            rules:
+              - {name: api, priority: 100, action: allow, l4: {peer: {domains: ["*.example.com"]}}}
   capabilities:
     version: cap/1
     default: enforced
     fields:
-      "network.allowOut.domain":
+      "network.egress.rules.l4.peer.domains":
         state: unsupported
         reason: "no name-based CNI policy and no L7 proxy in the egress path"
   clock: "2026-09-06T00:00:00Z"
@@ -52,19 +56,21 @@ expect:
   effectivePolicy:
     enforcement: bestEffort
     network:
-      allowOut: ["*.example.com"]
+      egress:
+            rules:
+              - {name: api, priority: 100, action: allow, l4: {peer: {domains: ["*.example.com"]}}}
   inertFields:
-    - field: network.allowOut.domain
+    - field: network.egress.rules.l4.peer.domains
       state: unsupported
       capabilityVersion: cap/1
   policyWarnings:
-    - field: network.allowOut.domain
+    - field: network.egress.rules.l4.peer.domains
       state: unsupported
       reason: "no name-based CNI policy and no L7 proxy in the egress path"
       capabilityVersion: cap/1
   auditEvents:
     - event: policy_field_inert
-      field: network.allowOut.domain
+      field: network.egress.rules.l4.peer.domains
       state: unsupported
 ---
 name: capability-besteffort-cannot-be-downgraded-by-request
@@ -144,7 +150,7 @@ given:
       "filesystem.denyPaths":
         state: partial
         enforcementPoint: mount
-        provider: runtime-mounts
+        provider: runtime-fs
         providerVersion: "1.0"
         scope: sandbox
         knownLimitations:

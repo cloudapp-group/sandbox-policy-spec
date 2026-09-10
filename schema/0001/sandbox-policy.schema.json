@@ -9,7 +9,12 @@
   "properties": {
     "tier": {
       "description": "overview.md §7.1. A policy that is present but omits this field resolves to `restricted`. Absent `policy` entirely resolves to `compatibility`, which this schema cannot express because it is a property of the request, not of this object.",
-      "enum": ["compatibility", "baseline", "restricted", "unrestricted"]
+      "enum": [
+        "compatibility",
+        "baseline",
+        "restricted",
+        "unrestricted"
+      ]
     },
     "tierVersion": {
       "description": "overview.md §7.1.7. Pins what the tier expands to.",
@@ -18,36 +23,56 @@
     },
     "auditTier": {
       "description": "overview.md §7.2. MUST be strictly more restrictive than the resolved `tier`; that cross-field rule is not expressible in JSON Schema and is enforced at §7.2.2.",
-      "enum": ["compatibility", "baseline", "restricted", "unrestricted"]
+      "enum": [
+        "compatibility",
+        "baseline",
+        "restricted",
+        "unrestricted"
+      ]
     },
     "enforcement": {
       "description": "overview.md §8.2.2. Default `strict`.",
-      "enum": ["strict", "bestEffort"],
+      "enum": [
+        "strict",
+        "bestEffort"
+      ],
       "default": "strict"
     },
-    "network": { "$ref": "#/$defs/network" },
-    "filesystem": { "$ref": "#/$defs/filesystem" },
-    "exec": { "$ref": "#/$defs/exec" },
-    "process": { "$ref": "#/$defs/process" },
-    "identity": { "$ref": "#/$defs/identity" },
-    "resource": { "$ref": "#/$defs/resource" }
+    "network": {
+      "$ref": "#/$defs/network"
+    },
+    "filesystem": {
+      "$ref": "#/$defs/filesystem"
+    },
+    "exec": {
+      "$ref": "#/$defs/exec"
+    },
+    "process": {
+      "$ref": "#/$defs/process"
+    },
+    "identity": {
+      "$ref": "#/$defs/identity"
+    },
+    "resource": {
+      "$ref": "#/$defs/resource"
+    }
   },
-
   "$defs": {
     "violationAction": {
       "description": "overview.md §8.1. There is no `warn`; see §8.1.2.",
-      "enum": ["deny", "kill"],
+      "enum": [
+        "deny",
+        "kill"
+      ],
       "default": "deny"
     },
     "auditLevel": {
       "description": "Governs ordinary-activity records only. It never suppresses violation events (overview.md §8.1.4).",
-      "enum": ["none", "metadata"],
+      "enum": [
+        "none",
+        "metadata"
+      ],
       "default": "none"
-    },
-    "egressTarget": {
-      "description": "network.md §2.1: IPv4, IPv4 CIDR, DNS name, or leading-`*.` wildcard DNS name.",
-      "type": "string",
-      "minLength": 1
     },
     "portSpec": {
       "description": "network.md §2.1.5: a single port or an inclusive range, within 1-65535.",
@@ -59,85 +84,92 @@
       "type": "string",
       "pattern": "^/"
     },
-
     "network": {
       "type": "object",
       "additionalProperties": false,
+      "description": "network.md — egress and ingress share one rule shape; see §2.",
       "properties": {
-        "allowInternetAccess": { "type": "boolean" },
-        "allowOut": { "type": "array", "items": { "$ref": "#/$defs/egressTarget" } },
-        "denyOut": {
-          "description": "network.md §3: IPv4 or IPv4 CIDR only. Domain names MUST be rejected.",
-          "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}(/[0-9]{1,2})?$"
-          }
-        },
-        "portRules": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "target"],
-            "properties": {
-              "name": { "type": "string", "minLength": 1 },
-              "target": { "$ref": "#/$defs/egressTarget" },
-              "protocols": {
-                "type": "array",
-                "items": { "enum": ["tcp", "udp"] },
-                "uniqueItems": true
-              },
-              "ports": { "type": "array", "items": { "$ref": "#/$defs/portSpec" } }
-            }
-          }
-        },
-        "rules": {
-          "description": "L7 rule grammar. Specified by name only in this revision — see network.md §1 and overview.md §11.15. Until that dependency is published, this schema does not constrain the rule body.",
-          "type": "array",
-          "items": { "type": "object" }
-        },
-        "onViolation": { "$ref": "#/$defs/violationAction" },
-        "audit": { "$ref": "#/$defs/auditLevel" },
-        "ingress": {
+        "internal": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "allowPublicTraffic": { "type": "boolean" },
-            "maskRequestHost": { "type": "string" }
+            "mode": {
+              "enum": [
+                "deny",
+                "allow",
+                "identity"
+              ],
+              "default": "deny"
+            },
+            "allowedPeers": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
           }
         },
-        "peerSelector": {
-          "description": "RESERVED. network.md §10.7 — MUST be rejected with 400 POLICY_UNSUPPORTED.",
-          "not": {}
+        "egress": {
+          "$ref": "#/$defs/networkDirection"
         },
-        "sandboxGroupRef": {
-          "description": "RESERVED. network.md §10.7 — MUST be rejected with 400 POLICY_UNSUPPORTED.",
-          "not": {}
+        "ingress": {
+          "$ref": "#/$defs/networkDirection"
+        },
+        "onViolation": {
+          "$ref": "#/$defs/violationAction"
+        },
+        "audit": {
+          "$ref": "#/$defs/auditLevel"
         }
       }
     },
-
     "filesystem": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "enum": ["baseline", "unrestricted"] },
-        "baselineVersion": { "type": "string", "pattern": "^baseline/[0-9]+$" },
-        "baselineExceptions": { "type": "array", "items": { "$ref": "#/$defs/absolutePath" } },
-        "denyPaths": { "type": "array", "items": { "$ref": "#/$defs/absolutePath" } },
-        "readOnlyPaths": { "type": "array", "items": { "$ref": "#/$defs/absolutePath" } },
-        "writableRoots": { "type": "array", "items": { "$ref": "#/$defs/absolutePath" } },
-        "implicitRuntimeWritable": { "type": "boolean" },
-        "onViolation": { "$ref": "#/$defs/violationAction" },
-        "audit": { "$ref": "#/$defs/auditLevel" },
-        "mounts": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "allowedHostPrefixes": { "type": "array", "items": { "$ref": "#/$defs/absolutePath" } },
-            "defaultReadOnly": { "type": "boolean" }
+        "mode": {
+          "enum": [
+            "baseline",
+            "unrestricted"
+          ]
+        },
+        "baselineVersion": {
+          "type": "string",
+          "pattern": "^baseline/[0-9]+$"
+        },
+        "baselineExceptions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/absolutePath"
           }
+        },
+        "denyPaths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/absolutePath"
+          }
+        },
+        "readOnlyPaths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/absolutePath"
+          }
+        },
+        "writableRoots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/absolutePath"
+          }
+        },
+        "implicitRuntimeWritable": {
+          "type": "boolean"
+        },
+        "onViolation": {
+          "$ref": "#/$defs/violationAction"
+        },
+        "audit": {
+          "$ref": "#/$defs/auditLevel"
         }
       },
       "allOf": [
@@ -145,41 +177,133 @@
           "description": "filesystem.md §5: readOnlyPaths and writableRoots are mutually exclusive on the merged result. This constraint catches the single-source case only.",
           "not": {
             "allOf": [
-              { "properties": { "readOnlyPaths": { "minItems": 1 } }, "required": ["readOnlyPaths"] },
-              { "properties": { "writableRoots": { "minItems": 1 } }, "required": ["writableRoots"] }
+              {
+                "properties": {
+                  "readOnlyPaths": {
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "readOnlyPaths"
+                ]
+              },
+              {
+                "properties": {
+                  "writableRoots": {
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "writableRoots"
+                ]
+              }
             ]
           }
         }
       ]
     },
-
     "exec": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "enum": ["unrestricted", "denylist", "allowlist"] },
-        "allowedCommands": { "$ref": "#/$defs/commandRules" },
-        "deniedCommands": { "$ref": "#/$defs/commandRules" },
-        "allowedUsers": { "type": "array", "items": { "type": "string" } },
-        "maxTimeoutSec": { "type": "integer", "exclusiveMinimum": 0 },
-        "maxConcurrent": { "type": "integer", "minimum": 0 },
-        "audit": { "enum": ["none", "metadata", "full"] }
+        "mode": {
+          "enum": [
+            "unrestricted",
+            "denylist",
+            "allowlist"
+          ]
+        },
+        "allowedCommands": {
+          "$ref": "#/$defs/commandRules"
+        },
+        "deniedCommands": {
+          "$ref": "#/$defs/commandRules"
+        },
+        "allowedUsers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxTimeoutSec": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "maxConcurrent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "audit": {
+          "enum": [
+            "none",
+            "metadata",
+            "full"
+          ]
+        }
       },
       "allOf": [
         {
           "description": "exec.md §5: allowlist requires a non-empty allowedCommands.",
-          "if": { "properties": { "mode": { "const": "allowlist" } }, "required": ["mode"] },
-          "then": { "required": ["allowedCommands"], "properties": { "allowedCommands": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "allowlist"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "allowedCommands"
+            ],
+            "properties": {
+              "allowedCommands": {
+                "minItems": 1
+              }
+            }
+          }
         },
         {
           "description": "exec.md §5: deniedCommands is meaningless under allowlist.",
-          "if": { "properties": { "mode": { "const": "allowlist" } }, "required": ["mode"] },
-          "then": { "not": { "required": ["deniedCommands"] } }
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "allowlist"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "deniedCommands"
+              ]
+            }
+          }
         },
         {
           "description": "exec.md §5: allowedCommands is meaningless under denylist.",
-          "if": { "properties": { "mode": { "const": "denylist" } }, "required": ["mode"] },
-          "then": { "not": { "required": ["allowedCommands"] } }
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "denylist"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "allowedCommands"
+              ]
+            }
+          }
         }
       ]
     },
@@ -188,136 +312,408 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "command"],
+        "required": [
+          "name",
+          "command"
+        ],
         "properties": {
-          "name": { "type": "string", "minLength": 1 },
-          "command": { "type": "string", "minLength": 1 }
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
-
     "process": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "enum": ["baseline", "unrestricted"] },
-        "noNewPrivileges": { "type": "boolean" },
-        "runAsNonRoot": { "type": "boolean" },
-        "allowDaemonize": { "type": "boolean" },
+        "mode": {
+          "enum": [
+            "baseline",
+            "unrestricted"
+          ]
+        },
+        "noNewPrivileges": {
+          "type": "boolean"
+        },
+        "runAsNonRoot": {
+          "type": "boolean"
+        },
+        "allowDaemonize": {
+          "type": "boolean"
+        },
         "allowedCapabilities": {
           "description": "process.md §3.2. `[\"none\"]` is the reserved spelling of the empty set and MUST NOT be mixed with capability names.",
           "type": "array",
-          "items": { "type": "string", "minLength": 1 },
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "anyOf": [
-            { "items": { "not": { "const": "none" } } },
-            { "maxItems": 1, "items": { "const": "none" } }
+            {
+              "items": {
+                "not": {
+                  "const": "none"
+                }
+              }
+            },
+            {
+              "maxItems": 1,
+              "items": {
+                "const": "none"
+              }
+            }
           ]
         },
-        "onViolation": { "$ref": "#/$defs/violationAction" },
-        "audit": { "$ref": "#/$defs/auditLevel" },
+        "onViolation": {
+          "$ref": "#/$defs/violationAction"
+        },
+        "audit": {
+          "$ref": "#/$defs/auditLevel"
+        },
         "syscall": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "mode": { "enum": ["baseline", "denylist", "allowlist"] },
-            "baselineVersion": { "type": "string", "pattern": "^syscall/[0-9]+$" },
-            "baselineExceptions": { "type": "array", "items": { "type": "string" } },
-            "deniedSyscalls": { "type": "array", "items": { "type": "string" } },
-            "allowedSyscalls": { "type": "array", "items": { "type": "string" } },
-            "implicitEssentialSyscalls": { "type": "boolean" },
-            "onViolation": { "$ref": "#/$defs/violationAction" }
+            "mode": {
+              "enum": [
+                "baseline",
+                "denylist",
+                "allowlist"
+              ]
+            },
+            "baselineVersion": {
+              "type": "string",
+              "pattern": "^syscall/[0-9]+$"
+            },
+            "baselineExceptions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "deniedSyscalls": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowedSyscalls": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "implicitEssentialSyscalls": {
+              "type": "boolean"
+            },
+            "onViolation": {
+              "$ref": "#/$defs/violationAction"
+            }
           },
           "allOf": [
             {
               "description": "process.md §5: allowlist requires a non-empty allowedSyscalls, and forbids deniedSyscalls.",
-              "if": { "properties": { "mode": { "const": "allowlist" } }, "required": ["mode"] },
+              "if": {
+                "properties": {
+                  "mode": {
+                    "const": "allowlist"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
               "then": {
-                "required": ["allowedSyscalls"],
-                "properties": { "allowedSyscalls": { "minItems": 1 } },
-                "not": { "required": ["deniedSyscalls"] }
+                "required": [
+                  "allowedSyscalls"
+                ],
+                "properties": {
+                  "allowedSyscalls": {
+                    "minItems": 1
+                  }
+                },
+                "not": {
+                  "required": [
+                    "deniedSyscalls"
+                  ]
+                }
               }
             },
             {
               "description": "process.md §5: allowedSyscalls is meaningless under denylist.",
-              "if": { "properties": { "mode": { "const": "denylist" } }, "required": ["mode"] },
-              "then": { "not": { "required": ["allowedSyscalls"] } }
+              "if": {
+                "properties": {
+                  "mode": {
+                    "const": "denylist"
+                  }
+                },
+                "required": [
+                  "mode"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "allowedSyscalls"
+                  ]
+                }
+              }
             }
           ]
         }
       }
     },
-
     "identity": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "enum": ["managed", "unrestricted"] },
+        "mode": {
+          "enum": [
+            "managed",
+            "unrestricted"
+          ]
+        },
         "workloadIdentity": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "audience": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-            "ttlSec": { "type": "integer", "exclusiveMinimum": 0 }
+            "enabled": {
+              "type": "boolean"
+            },
+            "audience": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "ttlSec": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            }
           },
           "allOf": [
             {
               "description": "identity.md §5.2: audience is required and non-empty when enabled.",
-              "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
-              "then": { "required": ["audience"], "properties": { "audience": { "minItems": 1 } } }
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "required": [
+                  "audience"
+                ],
+                "properties": {
+                  "audience": {
+                    "minItems": 1
+                  }
+                }
+              }
             }
           ]
         },
-        "defaultExposure": { "enum": ["proxy", "file", "env", "none"] },
+        "defaultExposure": {
+          "enum": [
+            "proxy",
+            "file",
+            "env",
+            "none"
+          ]
+        },
         "secrets": {
           "type": "array",
-          "items": { "$ref": "#/$defs/secretBinding" }
+          "items": {
+            "$ref": "#/$defs/secretBinding"
+          }
         },
-        "onViolation": { "$ref": "#/$defs/violationAction" },
-        "audit": { "$ref": "#/$defs/auditLevel" }
+        "onViolation": {
+          "$ref": "#/$defs/violationAction"
+        },
+        "audit": {
+          "$ref": "#/$defs/auditLevel"
+        }
       }
     },
     "secretBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "secretRef"],
+      "required": [
+        "name",
+        "secretRef"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
-        "secretRef": { "type": "string", "minLength": 1 },
-        "exposure": { "enum": ["proxy", "file", "env", "none"] },
-        "destinations": { "type": "array", "items": { "$ref": "#/$defs/egressTarget" } },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secretRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exposure": {
+          "enum": [
+            "proxy",
+            "file",
+            "env",
+            "none"
+          ]
+        },
+        "destinations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/egressTarget"
+          }
+        },
         "methods": {
           "type": "array",
-          "items": { "enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] },
+          "items": {
+            "enum": [
+              "GET",
+              "HEAD",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE",
+              "OPTIONS"
+            ]
+          },
           "uniqueItems": true
         },
-        "pathPrefixes": { "type": "array", "items": { "type": "string", "pattern": "^/" } },
-        "ttlSec": { "type": "integer", "exclusiveMinimum": 0 },
-        "path": { "$ref": "#/$defs/absolutePath" },
-        "envVar": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+        "pathPrefixes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        "ttlSec": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "envVar": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        }
       },
       "allOf": [
         {
           "description": "identity.md §4.1: destinations is required and non-empty for exposure: proxy.",
-          "if": { "properties": { "exposure": { "const": "proxy" } }, "required": ["exposure"] },
-          "then": { "required": ["destinations"], "properties": { "destinations": { "minItems": 1 } } }
+          "if": {
+            "properties": {
+              "exposure": {
+                "const": "proxy"
+              }
+            },
+            "required": [
+              "exposure"
+            ]
+          },
+          "then": {
+            "required": [
+              "destinations"
+            ],
+            "properties": {
+              "destinations": {
+                "minItems": 1
+              }
+            }
+          }
         },
         {
           "description": "identity.md §2.1.3: a binding MUST NOT carry fields its exposure mode does not use.",
-          "if": { "properties": { "exposure": { "const": "file" } }, "required": ["exposure"] },
-          "then": { "required": ["path"], "not": { "required": ["envVar"] } }
+          "if": {
+            "properties": {
+              "exposure": {
+                "const": "file"
+              }
+            },
+            "required": [
+              "exposure"
+            ]
+          },
+          "then": {
+            "required": [
+              "path"
+            ],
+            "not": {
+              "required": [
+                "envVar"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "exposure": { "const": "env" } }, "required": ["exposure"] },
-          "then": { "required": ["envVar"], "not": { "required": ["path"] } }
+          "if": {
+            "properties": {
+              "exposure": {
+                "const": "env"
+              }
+            },
+            "required": [
+              "exposure"
+            ]
+          },
+          "then": {
+            "required": [
+              "envVar"
+            ],
+            "not": {
+              "required": [
+                "path"
+              ]
+            }
+          }
         },
         {
-          "if": { "properties": { "exposure": { "const": "none" } }, "required": ["exposure"] },
-          "then": { "not": { "anyOf": [ { "required": ["destinations"] }, { "required": ["path"] }, { "required": ["envVar"] } ] } }
+          "if": {
+            "properties": {
+              "exposure": {
+                "const": "none"
+              }
+            },
+            "required": [
+              "exposure"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "destinations"
+                  ]
+                },
+                {
+                  "required": [
+                    "path"
+                  ]
+                },
+                {
+                  "required": [
+                    "envVar"
+                  ]
+                }
+              ]
+            }
+          }
         }
       ]
     },
-
     "resource": {
       "type": "object",
       "additionalProperties": false,
@@ -326,8 +722,14 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "cpuMillicores": { "type": "integer", "exclusiveMinimum": 0 },
-            "memoryMiB": { "type": "integer", "exclusiveMinimum": 0 },
+            "cpuMillicores": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "memoryMiB": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
             "netBandwidthKbps": {
               "description": "resource.md §3.1.3: zero MUST be rejected.",
               "type": "integer",
@@ -335,29 +737,52 @@
             }
           }
         },
-        "limits": { "$ref": "#/$defs/resourceLimits" },
-        "onExceeded": { "$ref": "#/$defs/exceedAction" },
-        "notifications": { "type": "object" }
+        "limits": {
+          "$ref": "#/$defs/resourceLimits"
+        },
+        "onExceeded": {
+          "$ref": "#/$defs/exceedAction"
+        },
+        "notifications": {
+          "type": "object"
+        }
       }
     },
     "exceedAction": {
       "description": "resource.md §6. Distinct from onViolation: an exceedance is not a boundary crossing (overview.md §8.1.1).",
-      "enum": ["warn", "pause", "hold", "kill"]
+      "enum": [
+        "warn",
+        "pause",
+        "hold",
+        "kill"
+      ]
     },
     "resourceLimits": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "cpuSeconds": { "$ref": "#/$defs/windowedLimit" },
-        "netEgressBytes": { "$ref": "#/$defs/windowedLimit" },
-        "diskWriteBytes": { "$ref": "#/$defs/windowedLimit" },
+        "cpuSeconds": {
+          "$ref": "#/$defs/windowedLimit"
+        },
+        "netEgressBytes": {
+          "$ref": "#/$defs/windowedLimit"
+        },
+        "diskWriteBytes": {
+          "$ref": "#/$defs/windowedLimit"
+        },
         "llmTokens": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "input": { "$ref": "#/$defs/windowedLimit" },
-            "output": { "$ref": "#/$defs/windowedLimit" },
-            "total": { "$ref": "#/$defs/windowedLimit" }
+            "input": {
+              "$ref": "#/$defs/windowedLimit"
+            },
+            "output": {
+              "$ref": "#/$defs/windowedLimit"
+            },
+            "total": {
+              "$ref": "#/$defs/windowedLimit"
+            }
           }
         }
       }
@@ -366,14 +791,303 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "minute": { "type": "integer", "minimum": 0 },
-        "hour": { "type": "integer", "minimum": 0 },
-        "day": { "type": "integer", "minimum": 0 },
-        "week": { "type": "integer", "minimum": 0 },
-        "month": { "type": "integer", "minimum": 0 },
-        "lifetime": { "type": "integer", "minimum": 0 },
-        "onExceeded": { "$ref": "#/$defs/exceedAction" }
+        "minute": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hour": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "day": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "week": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "month": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lifetime": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "onExceeded": {
+          "$ref": "#/$defs/exceedAction"
+        }
       }
+    },
+    "httpMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "Exact",
+            "PathPrefix",
+            "RegularExpression"
+          ],
+          "default": "PathPrefix"
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "value"
+      ]
+    },
+    "namedHttpMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "Exact",
+            "RegularExpression"
+          ],
+          "default": "Exact"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ]
+    },
+    "peer": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "network.md §2.3 — at least one of cidrs/domains/sandboxGroup.",
+      "properties": {
+        "cidrs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^\\d{1,3}(\\.\\d{1,3}){3}(/\\d{1,2})?$"
+          }
+        },
+        "domains": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(\\*\\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$"
+          }
+        },
+        "sandboxGroup": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "cidrs"
+          ]
+        },
+        {
+          "required": [
+            "domains"
+          ]
+        },
+        {
+          "required": [
+            "sandboxGroup"
+          ]
+        }
+      ]
+    },
+    "networkRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "network.md §2.1 — l4 and l7 are mutually exclusive; exactly one is required.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "action": {
+          "enum": [
+            "allow",
+            "deny"
+          ]
+        },
+        "l4": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol": {
+              "enum": [
+                "tcp",
+                "udp",
+                "icmp",
+                "all"
+              ],
+              "default": "all"
+            },
+            "ports": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/portSpec"
+              }
+            },
+            "peer": {
+              "$ref": "#/$defs/peer"
+            }
+          },
+          "required": [
+            "peer"
+          ],
+          "not": {
+            "allOf": [
+              {
+                "properties": {
+                  "protocol": {
+                    "const": "icmp"
+                  }
+                },
+                "required": [
+                  "protocol"
+                ]
+              },
+              {
+                "required": [
+                  "ports"
+                ]
+              }
+            ]
+          }
+        },
+        "l7": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scheme": {
+              "enum": [
+                "http",
+                "https"
+              ]
+            },
+            "hosts": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "method": {
+              "enum": [
+                "GET",
+                "HEAD",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "CONNECT",
+                "OPTIONS",
+                "TRACE"
+              ]
+            },
+            "path": {
+              "$ref": "#/$defs/httpMatch"
+            },
+            "headers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/namedHttpMatch"
+              }
+            },
+            "queryParams": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/namedHttpMatch"
+              }
+            },
+            "cookies": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/namedHttpMatch"
+              }
+            }
+          },
+          "required": [
+            "scheme",
+            "hosts"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "priority",
+        "action"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "l4"
+          ],
+          "not": {
+            "required": [
+              "l7"
+            ]
+          }
+        },
+        {
+          "required": [
+            "l7"
+          ],
+          "not": {
+            "required": [
+              "l4"
+            ]
+          }
+        }
+      ]
+    },
+    "networkDirection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "defaultAction": {
+          "enum": [
+            "allow",
+            "deny"
+          ]
+        },
+        "rules": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/networkRule"
+          }
+        }
+      }
+    },
+    "egressTarget": {
+      "description": "A network target in string form: IPv4 address, IPv4 CIDR, DNS name, or leading-'*.' wildcard. This is the spelling identity.md §4.1 uses for `destinations`; network.md §2.3 splits the same grammar into typed `peer.cidrs` / `peer.domains` fields.",
+      "type": "string",
+      "pattern": "^((\\d{1,3}(\\.\\d{1,3}){3}(/\\d{1,2})?)|((\\*\\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*))$"
     }
   }
 }
