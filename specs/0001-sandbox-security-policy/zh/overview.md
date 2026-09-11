@@ -28,6 +28,10 @@
 
 沙箱与 ECS 实例不同，它不只是网络端点，而是一个**执行着部分可信、由 Agent 生成的代码的执行环境**。因此它的"安全组"不仅要治理网络可达性，还必须治理这些代码能触碰哪些文件、能执行什么命令、能消耗多少资源 —— 否则边界就是不完整的。
 
+![本提案所定义的能力边界](../../../assets/sandbox-policy-boundary.png)
+
+*一图看清那条边界。`AGENT` 只能穿过 `IDENTITY` 才能抵达 `TOOL`（[identity.md](./identity.md)）—— 那条虚线就是全部的访问路径，绕过徽标没有别的路。三面被强制的墙约束什么可以抵达 Agent、它可以抵达什么（[network.md](./network.md)），以及它在脚下那个运行时上可以做什么（[process.md](./process.md)、[exec.md](./exec.md)）；而它的预算从上方被计量供给（[resource.md](./resource.md)）。[filesystem.md](./filesystem.md) 是图中唯一没有画出的模块 —— 它的规则治理的是同一层地面上的那些路径。*
+
 ## 2. 动机
 
 安全组之所以好用，是因为它：

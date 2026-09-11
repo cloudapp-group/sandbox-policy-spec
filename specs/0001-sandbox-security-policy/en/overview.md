@@ -28,6 +28,10 @@ Every cloud ECS instance ships with a security group: a declarative, reusable de
 
 A sandbox is not merely a network endpoint like an ECS instance. It is an **execution environment running partially trusted, agent-generated code**. Its "security group" must therefore govern not only network reachability, but also what that code can touch on disk, what it can execute, and how much it can consume — otherwise the boundary is incomplete.
 
+![The capability boundary this proposal defines](../../../assets/sandbox-policy-boundary.png)
+
+*The boundary in one picture. `AGENT` reaches `TOOL` only by passing through `IDENTITY` ([identity.md](./identity.md)) — the dashed line is the whole access path, and there is no route around the badge. Three enforced walls bound what may reach the agent and what it may reach ([network.md](./network.md)) and what it may do on the runtime beneath it ([process.md](./process.md), [exec.md](./exec.md)); its budget is metered from above ([resource.md](./resource.md)). [filesystem.md](./filesystem.md) is the one module the figure does not draw — its rules govern the paths on that same floor.*
+
 ## 2. Motivation
 
 A security group works because it is:

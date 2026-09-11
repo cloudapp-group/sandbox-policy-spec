@@ -7,6 +7,10 @@ This repository contains **Proposal 0001: Sandbox Security Policy** — a declar
 
 A sandbox is not just a network endpoint. It runs partially trusted, agent-generated code, so its capability boundary must cover **network, filesystem, execution, process behavior, identity, and resource** consumption in a single, unified object.
 
+![One sandbox's capability boundary: an authenticated path to its tools, three enforced walls, and a metered budget from above](assets/sandbox-policy-boundary.png)
+
+*The agent reaches a tool only by passing through an authenticated identity; three enforced walls bound what may reach it, what it may reach, and what it may do on the runtime beneath it; and its budget is metered from above.*
+
 ---
 
 ## What is this?
