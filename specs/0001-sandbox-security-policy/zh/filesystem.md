@@ -12,7 +12,7 @@
 
 表达力没有任何损失。一个应当只读的挂载是 `readOnlyPaths: [/mnt/data]`；一个应当不可读的挂载是 `denyPaths`。一旦挂载，路径就是路径，本模块不再关心它从哪来 —— 这移除了 [overview.md](./overview.md) §2.2 存在所要防止的那第二套并行语法。
 
-不在范围内：内容审查、文件数量/大小配额（写入字节量由资源限额覆盖）、镜像层构建，以及**哪些宿主路径可以被挂载**。同样不在范围内：识别异常文件访问 —— 那是审计流的关切，而不是一个策略字段（[overview.md](./overview.md) §2.3.1）。
+不在范围内：内容审查、文件数量与总大小配额、镜像层构建，以及**哪些宿主路径可以被挂载**。I/O *速率*在 [resource.md](./resource.md) §3.1 中被约束；总占用目前无处被约束，作为开放问题追踪在那里（§13.12）。同样不在范围内：识别异常文件访问 —— 那是审计流的关切，而不是一个策略字段（[overview.md](./overview.md) §2.3.1）。
 
 有两个相邻的面归 [process.md](./process.md) 管，在此点名，因为需要其中一个的策略通常也需要另一个。进程能否*提权*是 `process.noNewPrivileges`，不是一条路径规则 —— 一个位于可读路径下的 `setuid` 二进制，提权照样发生。进程能否*持久化*只有一部分是 `process.allowDaemonize`：自启型持久化是写在文件里的（`crontab`、systemd unit、shell profile、XDG autostart），所以阻止它是在本文档中由 `denyPaths`/`readOnlyPaths` 做出的决定（[process.md](./process.md) §3.4）。
 

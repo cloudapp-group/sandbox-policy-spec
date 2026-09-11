@@ -8,13 +8,17 @@ Part of [Proposal 0001 — Sandbox Security Policy](./overview.md). The key word
 
 This spec defines the `resource` sub-policy of the `SandboxPolicy` object. The module is named **resource** because that is exactly what it governs: what a sandbox may consume. It covers three contracts:
 
-- **Quota** — steady-state *rate*: how much the sandbox may use at any instant (CPU, memory, network bandwidth).
-- **Limits** — windowed *amounts*: how much the sandbox may consume per `minute`, `hour`, `day`, `week`, or `month` window, or over its whole `lifetime` (CPU-seconds, egress bytes, disk-write bytes, LLM tokens).
-- **Governance** — what happens when a limit is exceeded: warn, pause, terminate, or **hold for human intervention**, plus notifications so a human learns about it in time.
+- **Rate ceilings** — how *fast* the sandbox may consume: outbound request rate and concurrency, disk read/write throughput and IOPS. A ceiling is **shaped**, never failed: excess is queued and paced down (§3.1).
+- **Budgets** — windowed *amounts* of the one thing that accumulates irreversibly: LLM tokens, per `minute`, `hour`, `day`, `week`, or `month` window, or over the sandbox's whole `lifetime`.
+- **Governance** — what happens when a budget is exhausted: warn, pause, terminate, or **hold for human intervention**, plus notifications so a human learns about it in time.
 
-Rate throttling and runaway-agent protection are both amount problems with different time constants — that is why limits are windowed rather than a single lifetime number.
+The rate/amount split is what decides where `onExceeded` lives. A ceiling cannot be exceeded — it is a speed, and traffic above it waits — so it has no action, no event, and no held state. A budget can be exhausted, and something has to happen when it is. Tokens are the only budget here, which is why `onExceeded` appears only under `tokens` (§6). That is a consequence of the structure rather than a rule to remember.
 
-The rate/amount split is also the seam between this module and `network`: `network` decides *what may be reached*, `resource` decides *how much may flow*. A bandwidth ceiling is consumption, so it is a quota here rather than a field on an egress rule ([overview.md](./overview.md) §11.9).
+The same split is the seam between this module and `network`: `network` decides *what may be reached*, `resource` decides *how much may flow*. A request-rate ceiling is consumption, so it is a rate here rather than a field on an egress rule ([overview.md](./overview.md) §11.9).
+
+**What this module deliberately no longer covers.** An earlier revision carried `quota.cpuMillicores`, `quota.memoryMiB`, `limits.cpuSeconds`, `limits.netEgressBytes`, and `limits.diskWriteBytes`. All are removed. Bounding CPU and memory is a standard operational action every orchestrator and VMM already performs — a Kubernetes `resources.limits` block, a Cloud Hypervisor `--cpus` / `--memory` argument — and restating it here made the policy object appear to own a decision it merely echoed. Byte totals went for a different reason: an accumulated byte count is a poor proxy for the harm it was standing in for. What actually degrades a shared substrate is *rate*, and what actually costs money is tokens. What remains is the consumption surface generic ops tooling does not bound.
+
+The cost is stated rather than left to be discovered. `limits.cpuSeconds` was this proposal's only enforcement against runaway loops ([overview.md](./overview.md) §2.3). Containment for that threat now rests on the idle-timeout lifecycle and on the token budget, and for an agent loop the token budget is the binding constraint in practice: a loop that calls a model burns tokens, and a loop that does not burns CPU the orchestrator's own quota already caps. What is genuinely lost is the case in between — a sandbox spinning on local computation for hours, inside its CPU quota, calling nothing. That is now an operational concern and this object no longer claims otherwise.
 
 Out of scope: billing and pricing (the usage exposure below is the contract billing builds on); idle timeouts and lifecycle (existing behavior, unchanged — except that it remains applicable to held sandboxes, §7).
 
@@ -23,21 +27,18 @@ Out of scope: billing and pricing (the usage exposure below is the contract bill
 ```yaml
 policy:
   resource:
-    quota:
-      cpuMillicores:      int               # steady-state CPU quota
-      memoryMiB:          int               # steady-state memory quota
-      netBandwidthKbps:   int               # steady-state egress bandwidth ceiling
+    rate:                                  # ceilings: shaped, never exceeded (§3.1)
+      network:
+        requestsPerSecond:     int         # outbound requests/s
+        maxConcurrentRequests: int         # outbound requests in flight
+      disk:
+        readBytesPerSec:       int
+        writeBytesPerSec:      int
+        readIops:              int
+        writeIops:             int
     limits:
-      cpuSeconds:                          # vCPU-seconds
-        windows:  {minute?, hour?, day?, week?, month?, lifetime?}
-        onExceeded?: action                # optional, overrides the default
-      netEgressBytes:                      # outbound bytes
-        windows:  {minute?, hour?, day?, week?, month?, lifetime?}
-        onExceeded?: action
-      diskWriteBytes:                      # bytes written to block devices
-        windows:  {minute?, hour?, day?, week?, month?, lifetime?}
-        onExceeded?: action
-      llmTokens:
+      tokens:
+        onExceeded: warn | pause | hold | kill   # default for the three below
         input:                             # prompt tokens
           windows:  {minute?, hour?, day?, week?, month?, lifetime?}
           onExceeded?: action
@@ -47,40 +48,45 @@ policy:
         total:                             # input + output
           windows:  {minute?, hour?, day?, week?, month?, lifetime?}
           onExceeded?: action
-    onExceeded:        warn | pause | hold | kill    # resource-wide default
     notifications:
       thresholds:      [number]            # fractions of each limit; default [0.8, 1.0]
       webhook:         URL                 # optional delivery endpoint
 ```
 
-Dimensions: `cpuSeconds`, `netEgressBytes`, `diskWriteBytes`, and `llmTokens.{input,output,total}`. The three token dimensions are independent: each configured dimension is enforced on its own counters.
+Budget dimensions: `tokens.input`, `tokens.output`, `tokens.total`. The three are independent: each configured dimension is enforced on its own counters.
 
 ## 3. Field specification
 
 | Field | Type | Constraints | Default | Semantics |
 | --- | --- | --- | --- | --- |
-| `quota.cpuMillicores` | `int?` | ≥ 0 | template value | Steady-state CPU quota (millicores). |
-| `quota.memoryMiB` | `int?` | ≥ 0 | template value | Steady-state memory quota (MiB). |
-| `quota.netBandwidthKbps` | `int?` | > 0 | template value; unset = unlimited | Steady-state egress bandwidth ceiling (kbit/s). Excess traffic is **shaped, not failed** (§3.1). |
-| `limits.<dimension>.windows` | `map?` | Keys from `{minute, hour, day, week, month, lifetime}`; values > 0. Multiple windows MAY be set and are enforced independently. | unset (no limit) | Maximum consumption of the dimension per window (§4). |
-| `limits.<dimension>.onExceeded` | `enum?` | `warn` \| `pause` \| `hold` \| `kill` | resource default | Action when any window of this dimension is exceeded. |
-| `onExceeded` | `enum?` | same | `hold` | Resource-wide default action. |
+| `rate.network.requestsPerSecond` | `int?` | > 0 | unset = unlimited | Ceiling on outbound requests per second (§3.1, §5.1). |
+| `rate.network.maxConcurrentRequests` | `int?` | > 0 | unset = unlimited | Ceiling on outbound requests in flight at once. |
+| `rate.disk.readBytesPerSec` | `int?` | > 0 | unset = unlimited | Read throughput ceiling on the sandbox's block devices. |
+| `rate.disk.writeBytesPerSec` | `int?` | > 0 | unset = unlimited | Write throughput ceiling. |
+| `rate.disk.readIops` | `int?` | > 0 | unset = unlimited | Read operations per second ceiling. |
+| `rate.disk.writeIops` | `int?` | > 0 | unset = unlimited | Write operations per second ceiling. |
+| `limits.tokens.<dimension>.windows` | `map?` | Keys from `{minute, hour, day, week, month, lifetime}`; values > 0. Multiple windows MAY be set and are enforced independently. | unset (no limit) | Maximum token consumption per window (§4). |
+| `limits.tokens.<dimension>.onExceeded` | `enum?` | `warn` \| `pause` \| `hold` \| `kill` | `limits.tokens.onExceeded` | Action when any window of this dimension is exhausted. |
+| `limits.tokens.onExceeded` | `enum?` | same | `hold` | Default action for the three token dimensions. |
 | `notifications.thresholds` | `[number]?` | Each in (0, 1]. Sorted ascending. | `[0.8, 1.0]` | Fractions of each configured limit at which a notification is emitted. |
 | `notifications.webhook` | `string?` | `https` URL | unset | Endpoint receiving notification events (§8). |
 
-Zero/negative limits, empty `windows` maps, and thresholds outside (0, 1] MUST be rejected with `400 INVALID_POLICY`.
+Zero or negative rates and limits, empty `windows` maps, and thresholds outside (0, 1] MUST be rejected with `400 INVALID_POLICY`.
 
-`lifetime` is the never-resetting window: a limit for the sandbox's whole existence. The five periodic windows reset at their boundaries (§4.1).
+`lifetime` is the never-resetting window: a budget for the sandbox's whole existence. The five periodic windows reset at their boundaries (§4.1).
 
-### 3.1 Bandwidth semantics
+### 3.1 Rate ceiling semantics
 
-`quota.netBandwidthKbps` is a rate ceiling, and rate ceilings behave unlike every other field in this spec: they do not have an exceedance transition, because they cannot be exceeded.
+Every field under `rate` is a ceiling, and ceilings behave unlike budgets in a way that has to be fixed here rather than per field: they do not have an exceedance transition, because they cannot be exceeded.
 
-1. Traffic above the ceiling MUST be **shaped** — queued and paced down to the ceiling — not rejected. There is no `onExceeded` action for bandwidth, no `resource.exhausted` event, and no held state. A sandbox at its bandwidth ceiling is a slow sandbox, not a failing one.
-2. The ceiling applies to **egress** from the sandbox's network interface(s), measured at the same point as the `netEgressBytes` dimension (§5.1), so a tenant reading both numbers is reading one traffic stream.
-3. Unset means unlimited: the sandbox is bounded only by the platform's own capacity. Zero MUST be rejected with `400 INVALID_POLICY` — a sandbox that may reach a destination (`network`) but may not send a byte to it is a configuration whose failure mode is indistinguishable from a broken network, which principle 4 exists to prevent. "Send nothing" is expressed in `network`, where the denial is explainable.
-4. Bandwidth and `limits.netEgressBytes` are complementary and MUST be enforceable together: the quota bounds the instantaneous rate, the limit bounds the accumulated amount. Shaping reduces the rate at which a `netEgressBytes` window fills; it never substitutes for it.
+1. Work above the ceiling MUST be **shaped** — queued and paced down to the ceiling — not rejected. There is no `onExceeded` action for any `rate` field, no `resource.exhausted` event, and no held state. A sandbox at its ceiling is a slow sandbox, not a failing one.
+2. **A ceiling is defined as an average over an interval, and the interval MUST be stated.** A deployment MUST meet each configured ceiling when averaged over any window of 1 second or longer, and MUST NOT deliver less than 90% of the configured rate to a workload that continuously demands at least the ceiling. Instantaneous bursts above the ceiling MAY occur and are not a violation.
+
+   This clause exists because the common implementation is a token bucket with a refill period and a stall interval, and such a bucket can deliver a small fraction of its nominal rate when the refill period is short relative to the stall. A configured 1000 IOPS can arrive as 100 IOPS from a defensible-looking configuration. Without a stated averaging interval two deployments would resolve the same field to rates an order of magnitude apart and both would declare it `enforced` ([overview.md](./overview.md) §8.2), which is the failure that section exists to prevent.
+3. Unset means unlimited: the sandbox is bounded only by the platform's own capacity. Zero MUST be rejected with `400 INVALID_POLICY` — a sandbox that may reach a destination (`network`) but may not send a request to it is a configuration whose failure mode is indistinguishable from a broken network, which principle 4 exists to prevent. "Send nothing" is expressed in `network`, where the denial is explainable.
+4. **Shaping MUST be observable.** Each ceiling that has delayed work MUST report the accumulated delay it caused, per field, through usage exposure (§9.3). Shaping produces no events and no failures, which means an unobservable ceiling turns "my sandbox is slow" into a question nobody can answer from the platform's own records. Principle 4 requires a denial to be explainable; the same reasoning applied to a ceiling requires a slowdown to be attributable, and attributable means naming the field.
 5. Ingress shaping is not specified. Inbound traffic is not the sandbox's consumption to control, and a ceiling the workload cannot influence is not a policy field (§13.11).
+6. Ceilings and budgets are independent and MUST be enforceable together. A request-rate ceiling reduces the rate at which a token window fills; it never substitutes for the window.
 
 ## 4. Window semantics
 
@@ -102,26 +108,27 @@ All windows are fixed and aligned to UTC:
 1. Each (sandbox, dimension) pair has an append-only usage stream; a window's counter is the sum of usage within the current window period; the `lifetime` counter is the total since sandbox creation.
 2. A window counter MUST be non-decreasing within its window and resets to zero at rollover. The lifetime counter MUST be monotonically non-decreasing.
 3. Counters persist across pause/resume; resume never resets usage.
-4. Snapshot restore / clone: the restored sandbox inherits the **policy** (limits, actions, notifications) of the source; all counters, including lifetime, start from zero at the restore point. (Whether operators may choose counter inheritance instead is an open question, §13.)
+4. Snapshot restore / clone: the restored sandbox inherits the **policy** (limits, ceilings, actions, notifications) of the source; all counters, including lifetime, start from zero at the restore point. (Whether operators may choose counter inheritance instead is an open question, §13.)
 
 ### 4.3 Enforcement
 
 1. Every configured window is enforced independently: when any window's counter first reaches its limit, that dimension's action (§6) triggers.
 2. Multiple windows of the same dimension share the dimension's `onExceeded`.
-3. If several dimensions/windows are exceeded at the same observation, the most severe action among them wins: `kill` > `hold` > `pause` > `warn`.
+3. If several dimensions or windows are exhausted at the same observation, the most severe action among them wins: `kill` > `hold` > `pause` > `warn`.
 4. Checks SHOULD run both periodically and at each metering boundary so minute-granularity limits act promptly. Overshoot between checks MUST be absorbed: the action triggers on the first observation at-or-over the limit, and reported usage MAY exceed the limit by up to the observation granularity.
-5. Periodic exceedance is re-armed by rollover: a dimension that exhausts its `minute` window at 10:07:30 and rolls into a fresh window at 10:08:00 may consume again, and a new exceedance in the fresh window is a new transition with its own events.
+5. Periodic exhaustion is re-armed by rollover: a dimension that exhausts its `minute` window at 10:07:30 and rolls into a fresh window at 10:08:00 may consume again, and a new exhaustion in the fresh window is a new transition with its own events.
 
 ## 5. Metering semantics
 
-### 5.1 Dimension sources
+### 5.1 Measurement points
 
-| Dimension | Measured quantity |
+| Surface | Measured where |
 | --- | --- |
-| `cpuSeconds` | vCPU time consumed by all sandbox processes. |
-| `netEgressBytes` | Bytes leaving the sandbox's network interface(s). |
-| `diskWriteBytes` | Bytes written to the sandbox's writable block devices. |
-| `llmTokens.*` | LLM API tokens, per §5.2. |
+| `rate.network.*` | The platform's outbound request path — the same L7 enforcement point `network` L7 rules use ([network.md](./network.md) §2.4). A *request* is one HTTP request; connection reuse does not make several requests into one. |
+| `rate.disk.*` | The sandbox's block layer, in each direction, counting operations issued to the device. |
+| `tokens.*` | LLM API tokens, per §5.2. |
+
+`rate.network.*` counts requests rather than connections deliberately. A single keep-alive connection can carry an unbounded number of requests, so a connection ceiling would not bound what these fields are for. The consequence is a real dependency and is not smoothed over: a deployment with no L7 enforcement point in the egress path cannot meter requests at all and MUST declare both `rate.network` fields `unsupported` ([overview.md](./overview.md) §8.2). Whether a connection-level ceiling should exist as a fallback for such deployments is an open question (§13.14).
 
 ### 5.2 LLM token truth sources
 
@@ -158,20 +165,22 @@ In practice most token spend arrives over streamed responses that may be retried
 
 | Action | Semantics |
 | --- | --- |
-| `warn` | Emit the exceedance event only. For observability pilots, not protection. |
+| `warn` | Emit the exhaustion event only. For observability pilots, not protection. |
 | `pause` | Suspend the sandbox. It becomes resumable once every triggering window has rolled over, and SHOULD auto-resume at that point; a policy update raising the limit also releases it. Minute/hour windows therefore act as throttles, month/lifetime windows as circuit breakers. |
 | `hold` | Suspend the sandbox and wait for a human decision (§7). Does **not** auto-release at window rollover. |
 | `kill` | Terminate immediately; the terminal state records the dimension and window as the cause. |
 
-Action resolution: `limits.<dimension>.onExceeded` if set, else the resource-wide `onExceeded`.
+Action resolution: `limits.tokens.<dimension>.onExceeded` if set, else `limits.tokens.onExceeded`.
+
+`onExceeded` applies to token budgets and to nothing else. There is no resource-wide default because there is nothing else for it to default: `rate` fields are shaped and have no action (§3.1.1), so an action sitting at the top of the module would apply to exactly one subtree while appearing to apply to all of it. Deployments that later add a second budget dimension will need to decide whether the action moves up; until then it stays where it means something.
 
 The default is `hold`: configuring a limit is opting into governance, and hold is the only action that is both safe (consumption stops) and reversible (no data loss) while leaving the final say to a human. Deployments without an on-call workflow SHOULD set `warn` or `pause` explicitly — held sandboxes remain subject to the standard idle-timeout lifecycle, so an unattended hold cannot leak resources forever.
 
-`onExceeded` is this module's only response field: per [overview.md](./overview.md) §8.1.6, there is **no `onViolation` here**. The two are not alternatives that happened to land in different modules — they answer different questions, and §8.1.1 fixes which is which. An exceedance means the workload stayed inside every boundary it was given and ran out of budget; a violation means it crossed one. That is why this action set has `warn` and `hold` while `onViolation` has neither: there is something for a human to decide about "needs more budget", and a warning about overspending leaves no protection disabled, because a budget was never a protection against intent.
+`onExceeded` is this module's only response field: per [overview.md](./overview.md) §8.1.6, there is **no `onViolation` here**. The two are not alternatives that happened to land in different modules — they answer different questions, and §8.1.1 fixes which is which. An exhaustion means the workload stayed inside every boundary it was given and ran out of budget; a violation means it crossed one. That is why this action set has `warn` and `hold` while `onViolation` has neither: there is something for a human to decide about "needs more budget", and a warning about overspending leaves no protection disabled, because a budget was never a protection against intent.
 
 The one action both sets share is `kill`, and even it differs in scope. Here it terminates the **sandbox**, because consumption is a sandbox-level quantity with no single guilty process — the same granularity `network` is forced into for a different reason ([overview.md](./overview.md) §8.1.3).
 
-`policy.tier` ([overview.md](./overview.md) §7.1) does not change anything in this module. Both `baseline` and `restricted` resolve to template quotas, no windowed limits, and `onExceeded: hold` — the last of which is already the default above. This is stated rather than omitted because a reader who sees four modules shift under `tier: restricted` is entitled to know that the fifth deliberately does not: consumption budgets are workload-specific numbers, and there is no value for `llmTokens.total` that is "the restricted one". A tier that guessed would be a tier that breaks workloads for a security posture it cannot actually improve.
+`policy.tier` ([overview.md](./overview.md) §7.1) does not change anything in this module. Every tier resolves to no ceilings, no windowed limits, and `onExceeded: hold` — the last of which is already the default above. This is stated rather than omitted because a reader who sees four modules shift under `tier: restricted` is entitled to know that the fifth deliberately does not: consumption budgets are workload-specific numbers, and there is no value for `tokens.total` that is "the restricted one". A tier that guessed would be a tier that breaks workloads for a security posture it cannot actually improve.
 
 ### 6.1 Shadow evaluation support
 
@@ -179,7 +188,7 @@ Per [overview.md](./overview.md) §7.2.5, this module states its position: **it 
 
 The reasoning is the paragraph above. Shadow evaluation compares an enforced tier against a stricter one, and no tier changes any field here. There is no stricter set of limits for `auditTier: restricted` to evaluate against, so `auditTier` naming this module resolves to no findings — not because the mechanism is missing, but because the comparison is empty.
 
-This is not a gap to be closed later by adding shadow support. If it is ever worth answering "what would a tighter budget have blocked?", the answer already exists and is better: `onExceeded: warn` (§6) is that feature, arrived at from the other direction. A deployment that wants to observe a candidate limit sets the limit with `warn`, and gets exceedance events with real counters rather than a parallel evaluation of a number nobody has chosen. Two mechanisms for one outcome is what §10.1 already declines for grants, and the reasoning transfers unchanged.
+This is not a gap to be closed later by adding shadow support. If it is ever worth answering "what would a tighter budget have blocked?", the answer already exists and is better: `onExceeded: warn` (§6) is that feature, arrived at from the other direction. A deployment that wants to observe a candidate limit sets the limit with `warn`, and gets exhaustion events with real counters rather than a parallel evaluation of a number nobody has chosen. Two mechanisms for one outcome is what §10.1 already declines for grants, and the reasoning transfers unchanged.
 
 The distinction worth keeping straight: a shadow finding elsewhere in the proposal means "this operation would have been refused". Here the equivalent question is "this budget would have been exhausted", which is about a counter reaching a value rather than a decision about an operation — and counters are what this module exposes for real (§9) rather than in shadow.
 
@@ -191,7 +200,7 @@ The distinction worth keeping straight: a shadow finding elsewhere in the propos
 
    ```yaml
    # POST /sandboxes/{sandboxID}/resource/approval
-   dimension:  llmTokens.total   # optional; omit to decide all current holds
+   dimension:  tokens.total      # optional; omit to decide all current holds
    window:     month             # optional; omitted with dimension → all holds of that dimension
    decision:   approve           # approve | deny
    allowance:  1000000           # approve only, optional: extra headroom for the current window period
@@ -208,10 +217,11 @@ The distinction worth keeping straight: a shadow finding elsewhere in the propos
 ## 8. Notifications
 
 1. **Threshold notifications.** When any (dimension, window) counter crosses a configured threshold fraction of its limit, a `resource.notification` event MUST be emitted, at most once per threshold per window period: `{sandboxID, dimension, window, used, limit, threshold, at}`.
-2. **Exceedance events.** Every exceedance transition MUST emit `resource.exhausted`: `{sandboxID, dimension, window, used, limit, action}`.
+2. **Exhaustion events.** Every exhaustion transition MUST emit `resource.exhausted`: `{sandboxID, dimension, window, used, limit, action}`.
 3. **Hold events.** `resource.hold_requested` (§7) on every hold; `resource.approved` / `resource.denied` record the decision and the approver.
 4. **Delivery.** When `notifications.webhook` is configured, events MUST be delivered as HTTPS POST with the JSON payload above, at-least-once, with bounded retries. Webhook authentication/signature is an open question (§13). Events MUST also be available through the platform's event stream regardless of webhook configuration.
 5. Notification payloads MUST NOT include sandbox data beyond the counters themselves.
+6. Shaping emits no events (§3.1.1). It is reported through usage (§9.3) instead, because a ceiling that delayed work has nothing for a recipient to act on — only something for an operator to look up.
 
 ## 9. Usage exposure
 
@@ -219,12 +229,14 @@ The distinction worth keeping straight: a shadow finding elsewhere in the propos
 
    ```yaml
    resource:
-     quota: { cpuMillicores: 2000, memoryMiB: 2048, netBandwidthKbps: 51200 }
+     rate:
+       network: { requestsPerSecond: 50, maxConcurrentRequests: 16 }
+       disk:    { writeBytesPerSec: 52428800, writeIops: 2000 }
+     shaped:
+       requestsPerSecond: { delayedSec: 12.4, delayedOps: 318 }
+       writeBytesPerSec:  { delayedSec: 3.1,  delayedOps: 20481 }
      usage:
-       cpuSeconds:
-         current: { minute: 12.3, hour: 300.5, lifetime: 12345.6 }
-         limits:  { hour: 600, lifetime: 100000 }
-       llmTokens:
+       tokens:
          total:
            current:    { minute: 3500, day: 155000, lifetime: 1200000 }
            limits:     { minute: 10000, day: 1000000, month: 50000000 }
@@ -233,9 +245,9 @@ The distinction worth keeping straight: a shadow finding elsewhere in the propos
    ```
 
 2. `limits` reports the effective configured windows; `current` reports the in-window counters for the configured windows. Lifetime counters MUST be reported even when no lifetime limit is configured (billing needs them).
-3. `quota.netBandwidthKbps` is reported when set and omitted when unlimited. It has no `usage` entry: a rate ceiling has no counter (§3.1). Accumulated egress is `usage.netEgressBytes`.
-4. For `llmTokens` dimensions, `provenance` reports the lifetime split of how the amounts were learned (§5.4). The three values MUST sum to the lifetime counter, so a tenant can see how much of a bill rests on estimates.
-5. `state.exhausted` lists the currently-exceeded (dimension, window) pairs; `state.held` is true while a hold is pending.
+3. `rate` reports the ceilings that are set and omits those that are unlimited. Ceilings have no `usage` entry — a rate has no counter (§3.1) — and are instead accompanied by `shaped`, which is keyed by the ceiling field that caused the delay. `delayedSec` is the lifetime-cumulative time work spent waiting on that ceiling and MUST be monotonically non-decreasing; `delayedOps` is the number of requests or I/O operations that waited. A ceiling that has never delayed anything MAY be omitted from `shaped`. Naming the field is the point: it is what turns "the sandbox is slow" into "the sandbox is at its write ceiling" (§3.1.4).
+4. For token dimensions, `provenance` reports the lifetime split of how the amounts were learned (§5.4). The three values MUST sum to the lifetime counter, so a tenant can see how much of a bill rests on estimates.
+5. `state.exhausted` lists the currently-exhausted (dimension, window) pairs; `state.held` is true while a hold is pending.
 6. The SDK exposes the same object as `sandbox.resource`.
 
 ## 10. Merge semantics
@@ -244,20 +256,21 @@ On top of [overview.md](./overview.md) §5:
 
 | Field | Merge refinement |
 | --- | --- |
-| `quota.cpuMillicores`, `quota.memoryMiB` | Explicit value overrides; absent keeps template value. |
-| `quota.netBandwidthKbps` | Minimum of the set values wins; a source that sets nothing keeps the lower-precedence value. A higher-precedence source cannot *raise* a ceiling set by a lower-precedence source, nor unset it. |
-| `limits.*.windows` | Per (dimension, window): minimum of set values wins; a dimension set by no source is unlimited. A higher-precedence source cannot *remove* a limit set by a lower-precedence source. |
-| `onExceeded` (default and per-dimension) | Most severe wins: `kill` > `hold` > `pause` > `warn`. |
+| `rate.*` | Minimum of the set values wins, per field. A source that sets nothing keeps the lower-precedence value. A higher-precedence source cannot *raise* a ceiling set by a lower-precedence source, nor unset it. |
+| `limits.tokens.*.windows` | Per (dimension, window): minimum of set values wins; a dimension set by no source is unlimited. A higher-precedence source cannot *remove* a limit set by a lower-precedence source. |
+| `onExceeded` (dimension default and per-dimension) | Most severe wins: `kill` > `hold` > `pause` > `warn`. |
 | `notifications.thresholds` | Union across sources, deduplicated, sorted ascending. |
 | `notifications.webhook` | Union across sources (additive observability). |
 
-`quota.cpuMillicores` and `quota.memoryMiB` keep override semantics because that is today's template behavior and changing it would break existing callers ([overview.md](./overview.md) §9). `netBandwidthKbps` is new, so it is narrow-only from the start — the shared merge principle applies wherever compatibility does not force otherwise.
+**This module now has no merge exception.** The previous revision carried one: `quota.cpuMillicores` and `quota.memoryMiB` kept override semantics rather than narrow-only, because that was the existing template behaviour and changing it would have broken callers ([overview.md](./overview.md) §9). Removing those fields (§1) removes the carve-out with them, so every field here is narrow-only and the shared merge principle holds without qualification — which is worth recording, because §5 of overview.md is easier to reason about with one fewer documented exception.
 
 ### 10.1 Grantable fields
 
 Per [overview.md](./overview.md) §5.1.8 every module declares its grantable surface. **This module has none.** No `resource` field may be widened by a time-bounded grant.
 
-Temporary additional consumption is already a first-class operation here, and it has a different shape from a grant: the approval API (§7.3) is driven by a **hold**, so a human decides at the moment the sandbox actually needs more, with the exceeded counters in front of them. A grant is a pre-authorization issued before the need is demonstrated. Adding grants to this module would give the same outcome two mechanisms, one of which discards the information the other is built on.
+Temporary additional consumption is already a first-class operation here, and it has a different shape from a grant: the approval API (§7.3) is driven by a **hold**, so a human decides at the moment the sandbox actually needs more, with the exhausted counters in front of them. A grant is a pre-authorization issued before the need is demonstrated. Adding grants to this module would give the same outcome two mechanisms, one of which discards the information the other is built on.
+
+`rate` fields are not grantable either, and for them the reason is simpler: a grant relaxes a restriction for a bounded time, and a ceiling that is temporarily raised is just a different ceiling. Nothing is being refused, so there is nothing to relax.
 
 > **Terminology.** The `allowance` field of the approval API (§7.3) is deliberately *not* called a grant. It adds headroom to a window counter and has no TTL of its own — it reverts at window rollover, or never, for `lifetime` — which makes it a different mechanism from the time-bounded grants of [overview.md](./overview.md) §5.1. Both were briefly named `grant`; this field was renamed rather than leave one word meaning two things in one object.
 
@@ -265,30 +278,36 @@ Temporary additional consumption is already a first-class operation here, and it
 
 | Code | Surface | Payload | When |
 | --- | --- | --- | --- |
-| `INVALID_POLICY` | 400 | `{field, reason}` | Non-positive limit, invalid window key, threshold outside (0, 1]. |
-| `POLICY_RESOURCE_EXHAUSTED` | terminal state / event | `{dimension, window, used, limit, action}` | Exceedance with action `kill` (or an approval `deny`). |
+| `INVALID_POLICY` | 400 | `{field, reason}` | Non-positive rate or limit, invalid window key, threshold outside (0, 1]. |
+| `POLICY_RESOURCE_EXHAUSTED` | terminal state / event | `{dimension, window, used, limit, action}` | Exhaustion with action `kill` (or an approval `deny`). |
 | `POLICY_RESOURCE_HELD` | sandbox state / event | `{dimension, window, used, limit}` | Sandbox held pending approval. |
+| `POLICY_UNSUPPORTED` | 400 | `{field, capabilityVersion}` | A `rate` field this deployment declares `unsupported` was named under `enforcement: strict` ([overview.md](./overview.md) §8.2). |
 | approval errors | 400 / 409 | `{reason}` | Approval targets no current hold, or invalid allowance/raise. |
+
+No error exists for reaching a ceiling, because reaching a ceiling is not a failure (§3.1.1).
 
 ## 12. Acceptance criteria
 
-1. Multi-window enforcement: with `llmTokens.total` limited per `minute` (action `pause`) and per `month` (action `hold`), a burst over the minute limit pauses the sandbox, which becomes resumable (and auto-resumes) at minute rollover; crossing the month limit holds it for approval.
-2. Rollover re-arms: after the minute window resets, consumption up to the new limit proceeds without events until a new threshold/exceedance transition.
+1. Multi-window enforcement: with `tokens.total` limited per `minute` (action `pause`) and per `month` (action `hold`), a burst over the minute limit pauses the sandbox, which becomes resumable (and auto-resumes) at minute rollover; crossing the month limit holds it for approval.
+2. Rollover re-arms: after the minute window resets, consumption up to the new limit proceeds without events until a new threshold/exhaustion transition.
 3. Hold requires a human: a held sandbox does not resume at window rollover; `approve` (with or without allowance/raise) resumes it; `deny` terminates it; an allowance of N permits at most N further units in the current period.
 4. The approval API rejects calls authenticated with sandbox-scoped credentials.
-5. Threshold notifications fire at most once per threshold per window period; exceedance and hold events fire on every transition.
+5. Threshold notifications fire at most once per threshold per window period; exhaustion and hold events fire on every transition.
 6. Lifetime counters are monotonic and reported even without a lifetime limit.
-7. Simultaneous exceedance resolves to the most severe action.
+7. Simultaneous exhaustion resolves to the most severe action.
 8. Restore/clone: policy inherited, all counters zero.
-9. Merged per-window limits take the minimum; merged actions take the most severe.
+9. Merged per-window limits and merged ceilings both take the minimum; merged actions take the most severe.
 10. **Streaming.** A stream that completes normally meters the final chunk's `usage` with provenance `response`. The same stream aborted before its final chunk still meters a non-zero amount with provenance `estimated`, and that amount is no greater than what the completed stream metered.
 11. **Retries.** Three provider attempts that each return `usage` meter three times; an attempt that fails before any content meters zero. Platform-initiated retries are attributed to the originating sandbox.
 12. **Late correction.** An authoritative `usage` arriving after an estimate applies a positive delta only; no counter ever decreases.
 13. **Provenance exposure.** The `response` / `estimated` / `reported` split is reported and sums to the lifetime counter.
 14. `report_usage` called with sandbox-scoped credentials is rejected.
-15. **Bandwidth shaping.** With `quota.netBandwidthKbps` set, a sustained transfer completes at approximately the configured rate; no connection is refused, no `resource.exhausted` event is emitted, and the sandbox is never paused, held, or killed by the ceiling. With the field unset, the same transfer is not rate-limited.
-16. **Bandwidth is not a limit.** A sandbox with both `quota.netBandwidthKbps` and a `limits.netEgressBytes` window still triggers that window's action when the accumulated amount is reached; shaping only delays when that happens. `netBandwidthKbps: 0` is rejected with `400 INVALID_POLICY`.
-17. **Bandwidth merge.** A request setting a higher `netBandwidthKbps` than the template's value resolves to the template's value; a lower value resolves to the request's.
+15. **Ceilings shape rather than fail.** With each `rate` field set in turn, a workload demanding more than the ceiling completes at approximately the configured rate; no request is refused, no I/O returns an error, no `resource.exhausted` event is emitted, and the sandbox is never paused, held, or killed by the ceiling. With the field unset, the same workload is not rate-limited.
+16. **Ceiling accuracy.** For each `rate` field, a workload demanding at least the ceiling for 10 seconds achieves between 90% and 100% of the configured rate averaged over any 1-second interval within that period (§3.1.2). A deployment whose token bucket delivers materially less fails this criterion and MUST NOT declare the field `enforced`.
+17. **Request counting.** With `requestsPerSecond: N`, N+1 HTTP requests issued over a **single** keep-alive connection are shaped as N+1 requests, not as one connection (§5.1).
+18. **Shaping is attributable.** After a period of shaping, `resource.shaped` names the ceiling field that delayed the work, with a non-zero monotonic `delayedSec`. A ceiling that never delayed anything reports nothing.
+19. **Ceilings and budgets are independent.** A sandbox with `rate.network.requestsPerSecond` set and a `tokens.total` window still triggers that window's action when the budget is reached; shaping only delays when that happens.
+20. **Unsupported rate fields.** Under `enforcement: strict`, naming a `rate` field the deployment declares `unsupported` is rejected with `400 POLICY_UNSUPPORTED`; under `bestEffort` it is accepted and reported inert.
 
 ## 13. Open questions
 
@@ -302,18 +321,22 @@ Temporary additional consumption is already a first-class operation here, and it
 8. **Counter inheritance on restore/clone.** Reset is proposed here; should inheritance be available as an operator choice?
 9. **Estimation method.** §5.3 fixes the *properties* of an estimate (lower bound, derived from observed content) but not the algorithm. Should the algorithm and its expected error be published, so tenants can audit the estimated portion of their usage?
 10. **Cached and reasoning tokens.** Providers increasingly meter cache reads and reasoning tokens separately. Do those become their own dimensions, or fold into `input` / `output`?
-11. **Ingress shaping.** §3.1.5 specifies egress only. Should an inbound ceiling exist for sandboxes that serve public traffic (`network.ingress`), and if so, is it a `resource` field at all, given that the sandbox does not choose how much arrives?
-12. **Disk and IOPS quotas.** `diskWriteBytes` bounds the amount written but nothing bounds the *rate*, and nothing bounds total footprint on disk. Are `quota.diskIops` and a size ceiling needed, or is the write-amount limit enough in practice?
-13. **Per-destination rate.** A bandwidth ceiling is per sandbox. Whether a rate can be attached to a single egress rule is the mirror of this question and is tracked in [network.md](./network.md) §10.5; it must be answered once, not twice.
+11. **Ingress shaping.** §3.1.5 specifies outbound only. Should an inbound ceiling exist for sandboxes that serve public traffic (`network.ingress`), and if so, is it a `resource` field at all, given that the sandbox does not choose how much arrives?
+12. **Disk footprint, and writes the substrate cannot attribute.** Two gaps remain after the move from byte totals to rates. Nothing bounds total footprint on disk — a sandbox can fill a volume slowly and stay under every ceiling — so a size limit may still be needed, and it would be an amount rather than a rate, which is the one place a non-token budget would reappear. Separately, `rate.disk.*` is only enforceable where the substrate attributes I/O to the sandbox; §14 records where it does not. Should the spec require a deployment to state *which* writable areas its disk ceilings cover, the way [filesystem.md](./filesystem.md) requires path rules to be enumerated?
+13. **Per-destination rate.** A request-rate ceiling is per sandbox. Whether a rate can be attached to a single egress rule is the mirror of this question and is tracked in [network.md](./network.md) §10.5; it must be answered once, not twice.
+14. **Concurrency without an L7 enforcement point.** `rate.network.*` counts requests, so a deployment with no proxy in the egress path declares both fields `unsupported` (§5.1) and has no concurrency ceiling at all. A connection-level ceiling would be enforceable there from conntrack alone. Should one exist as a documented fallback, accepting that connections and requests are different quantities and that a keep-alive workload would slip past it?
 
 ## 14. Non-normative notes
 
-- Every dimension has a natural source in the sandbox's own kernel accounting (CPU time, block I/O, interface statistics) or in the outbound HTTP path (LLM `usage` fields); window counters derive from those streams. The spec fixes only the semantics above.
-- Bandwidth shaping is the one contract here that is enforced rather than metered: the platform paces the sandbox's egress instead of counting it. Because the mechanism sits on the same interface the `netEgressBytes` dimension is measured on, the two numbers stay consistent for free — which is the reason §3.1.2 fixes the measurement point rather than leaving it to the implementation.
-- **Substrate mapping.** `quota` and every window counter rest on cgroup accounting, which is the same interface on both substrates ([overview.md](./overview.md) §12.2), so `cpuMillicores`, `memoryMiB`, `cpuSeconds`, and the exceed actions map directly either way. Two dimensions deserve a closer look before a deployment declares them `enforced`:
+- Token counters come from the outbound HTTP path; disk and request counters come from the substrate's own accounting. The spec fixes only the semantics above.
+- Shaping is the one contract here that is enforced rather than metered: the platform paces the sandbox instead of counting it. The `shaped` counters of §9.3 exist so that pacing is still visible, which is why §3.1.4 makes them normative rather than leaving observability to each deployment.
+- **Substrate mapping.** Both substrates expose byte-rate and operation-rate limits through a single interface, so `readIops` / `writeIops` cost a deployment nothing beyond `readBytesPerSec` / `writeBytesPerSec`. On the container substrate that interface is the cgroup v2 IO controller, whose `rbps` / `wbps` / `riops` / `wiops` keys delay I/O when a limit is reached — which is the shaping semantics of §3.1.1 rather than an approximation of it. On the VM substrate it is the VMM's per-disk rate limiter, with independent bandwidth and operation buckets. The VM case has a property worth noting because it inverts the pattern the rest of the proposal has: the limiter runs in the VMM, *outside* the guest, so unlike `process` and `filesystem` on that substrate ([overview.md](./overview.md) §12.2) these fields carry no trust precondition — a workload with root inside the guest cannot lift them.
 
-  | Dimension | What to check |
+  Three things to check before declaring any of these `enforced`:
+
+  | Field | What to check |
   | --- | --- |
-  | `diskWriteBytes` | The requirement is bytes written to the sandbox's *writable* devices (§5.1). On the VM substrate that is the guest's block layer. On the container substrate, writes landing in a union filesystem's upper layer may not appear in block-device statistics the way a dedicated volume's do, so a deployment that cannot see them completely declares `partial` and documents which writes are counted — per [overview.md](./overview.md) §8.2.1 rule 3, the narrowing has to be described, because "some of your writes are counted" is unusable without knowing which. |
-  | `llmTokens.*` | These come from the outbound HTTP path, not the kernel, so they require the same L7 proxy `network.rules` needs. A deployment without a proxy in the egress path cannot meter tokens at all and declares them `unsupported`. This is the one cross-module implementation dependency in the proposal: two modules, one mechanism. |
-- `netBandwidthKbps` shaping and `netEgressBytes` metering both attach to the sandbox's network interface. On the container substrate the sandbox is one Pod ([network.md](./network.md) §4.9), so that interface belongs to the sandbox and nothing else — the same arrangement the VM substrate has. This module therefore needs no scope caveat of its own: the interface, the Pod cgroup the counters rest on, and the policy's subject are all the same unit. Note that the containers *inside* one sandbox share both, which is correct rather than a problem, because a consumption budget is a property of the sandbox and not of the containers that make it up.
+  | `rate.disk.write*` | Buffered writes are attributed to a cgroup only where the filesystem implements cgroup writeback. Where it does not, writeback I/O is attributed to the root cgroup and escapes the ceiling entirely. A container writing into a union filesystem's upper layer is the common case of this, so a deployment whose sandboxes write there declares `partial` and records in `knownLimitations` which writable areas *are* covered — per [overview.md](./overview.md) §8.2.1 rule 3, "some of your writes are paced" is unusable without knowing which. A dedicated volume on a filesystem with cgroup writeback support is the configuration where the field is fully enforceable. |
+  | `rate.disk.read*` | Page-cache hits issue no I/O to the device, so a read ceiling bounds only reads that miss cache. A workload re-reading a hot file is unbounded on either substrate. This is inherent rather than a gap in any implementation, and it makes the read pair the one most deployments will declare `partial`. |
+  | `rate.network.*` | These come from the outbound request path, not the kernel, so they require the same L7 enforcement point `network` L7 rules and token metering need. A deployment without one declares them `unsupported` (§5.1). Three surfaces, one mechanism — which is the strongest argument in the proposal for treating that proxy as core rather than optional infrastructure. |
+- `rate.network.*` attaches to the sandbox's egress path and the disk ceilings to its block devices. On the container substrate the sandbox is one Pod ([network.md](./network.md) §4.9), so both belong to the sandbox and nothing else — the same arrangement the VM substrate has. This module therefore needs no scope caveat of its own: the egress path, the devices, the cgroup the counters rest on, and the policy's subject are all the same unit. Note that the containers *inside* one sandbox share all of them, which is correct rather than a problem, because a consumption budget is a property of the sandbox and not of the containers that make it up.

@@ -70,7 +70,9 @@ expect:
       mode: managed
       defaultExposure: proxy
     resource:
-      onExceeded: hold
+      limits:
+        tokens:
+          onExceeded: hold
 ---
 name: tier-baseline-drops-public-ingress
 spec: overview.md §7.1

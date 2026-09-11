@@ -12,7 +12,7 @@ An earlier revision of this module also governed the host boundary: which host p
 
 Nothing is lost in expressiveness. A mount that should be read-only is `readOnlyPaths: [/mnt/data]`; a mount that should be unreadable is `denyPaths`. Once mounted, a path is a path, and this module no longer cares where it came from — which removes the second, parallel grammar that §2.2 of [overview.md](./overview.md) exists to prevent.
 
-Out of scope: content inspection, quotas on file count/size (covered by resource limits for bytes written), image-layer construction, and **which host paths may be mounted at all**. Also out of scope: detecting anomalous file access, which is an audit-stream concern rather than a policy field ([overview.md](./overview.md) §2.3.1).
+Out of scope: content inspection, quotas on file count and total size, image-layer construction, and **which host paths may be mounted at all**. I/O *rate* is bounded in [resource.md](./resource.md) §3.1; total footprint is bounded nowhere yet and is tracked as an open question there (§13.12). Also out of scope: detecting anomalous file access, which is an audit-stream concern rather than a policy field ([overview.md](./overview.md) §2.3.1).
 
 Two adjacent surfaces belong to [process.md](./process.md) and are named here because policies that need one usually need the other. Whether a process may *gain privilege* is `process.noNewPrivileges`, not a path rule — a `setuid` binary under a readable path is still a privilege gain. Whether a process may *persist* is only partly `process.allowDaemonize`: autostart persistence is written to files (`crontab`, systemd units, shell profiles, XDG autostart), so blocking it is a `denyPaths`/`readOnlyPaths` decision made here ([process.md](./process.md) §3.4).
 

@@ -20,7 +20,7 @@ This proposal defines the `SandboxPolicy` object: the equivalent of a cloud secu
 | **Exec** | Command allowlist/denylist, user restriction, timeout ceiling, concurrency limits, audit |
 | **Process** | Privilege gain, persistence, and system-call policy for already-running processes |
 | **Identity** | Workload identity, secret exposure modes, destination-bound credential injection, TTL and revocation |
-| **Resource** | CPU/memory quotas, bandwidth ceiling, windowed limits (minute–month + lifetime), LLM token accounting, exceed actions |
+| **Resource** | Request/disk rate ceilings with shaping counters, windowed token budgets (minute–month + lifetime), token accounting, exceed actions |
 
 The specification is organized as a seven-document set under `specs/0001-sandbox-security-policy/`, with a JSON Schema under `schema/` and conformance fixtures under `fixtures/`.
 
@@ -54,7 +54,7 @@ The six capability domains are at very different levels of maturity:
 | **Exec** | Per-request `timeout`, `user`, `cwd` | No sandbox-level command policy, user restriction, concurrency cap, or audit |
 | **Process** | Nothing user-facing | No policy surface for privilege gain, persistence, or system-call exposure |
 | **Identity** | Nothing | Credentials arrive as env vars or files, readable by any code in the sandbox; no workload identity, exposure mode, TTL, or revocation |
-| **Resource** | Steady-state CPU/memory quotas; idle timeout | No windowed limits, lifetime budgets, bandwidth ceiling, LLM token metering, or exceed actions |
+| **Resource** | Steady-state CPU/memory quotas; idle timeout | No rate ceiling on requests or disk I/O, no windowed token budgets, no token metering, no exceed actions |
 
 Without a single policy object, every module grows its own config style, merge rules, defaults, and audit format. Users must reason about six half-systems; template authors cannot say "this template's sandboxes are locked down" in one place; and future modules would add a seventh and eighth dialect.
 
@@ -92,7 +92,7 @@ The design is guided by six principles:
     │   ├── exec.md          # Command execution sub-policy
     │   ├── process.md       # Privilege, persistence, and system-call sub-policy
     │   ├── identity.md      # Workload identity, secret exposure, credential scope
-    │   └── resource.md      # Resource limits, governance, and LLM token accounting
+    │   └── resource.md      # Rate ceilings, token budgets, and governance
     └── zh/
         ├── overview.md      # 共享模型、合并语义、原则、分级、影子评估、限时授权、兼容性
         ├── network.md       # 网络子策略
@@ -100,7 +100,7 @@ The design is guided by six principles:
         ├── exec.md          # 命令执行子策略
         ├── process.md       # 提权、持久化与系统调用子策略
         ├── identity.md      # 工作负载身份、秘密暴露、凭据作用域
-        └── resource.md      # 资源限制、治理与 LLM Token 计量
+        └── resource.md      # 速率上限、Token 预算与治理
 ```
 
 ---

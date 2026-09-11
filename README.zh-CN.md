@@ -20,7 +20,7 @@
 | **Exec** | 命令白名单/黑名单、用户限制、超时上限、并发限制、审计 |
 | **Process** | 已运行进程的提权、持久化与系统调用策略 |
 | **Identity** | 工作负载身份、秘密暴露模式、目的地绑定的凭据注入、TTL 与吊销 |
-| **Resource** | CPU/内存配额、带宽上限、窗口化限制（分钟–月 + 生命周期）、LLM Token 计量、超限处置 |
+| **Resource** | 请求/磁盘速率上限与整形计数、窗口化 Token 预算（分钟–月 + 生命周期）、Token 计量、超限处置 |
 
 规范以七文档集合的形式组织在 `specs/0001-sandbox-security-policy/` 目录下，JSON Schema 位于 `schema/`，合规性 fixtures 位于 `fixtures/`。
 
@@ -54,7 +54,7 @@
 | **Exec** | 每次请求单独设置 `timeout`、`user`、`cwd` | 缺少沙箱级命令策略、用户限制、并发上限和审计 |
 | **Process** | 无任何面向用户的能力 | 提权、持久化与系统调用暴露面完全没有策略表达 |
 | **Identity** | 无 | 凭据以环境变量或文件抵达，沙箱内任何代码都能读到；没有工作负载身份、暴露模式、TTL 或吊销 |
-| **Resource** | CPU/内存稳态配额；空闲超时 | 缺少窗口化限制、生命周期预算、带宽上限、LLM Token 计量和超限处置 |
+| **Resource** | CPU/内存稳态配额；空闲超时 | 缺少请求与磁盘 I/O 的速率上限、窗口化 Token 预算、Token 计量和超限处置 |
 
 如果没有单一策略对象，每个模块都会长出各自的配置风格、合并规则、默认值和审计格式。用户必须同时理解六个半成品系统；模板作者无法在一个地方表达"该模板的沙箱已被锁定"；未来的新模块还会引入第七、第八种方言。
 
@@ -92,7 +92,7 @@
     │   ├── exec.md          # Command execution sub-policy
     │   ├── process.md       # Privilege, persistence, and system-call sub-policy
     │   ├── identity.md      # Workload identity, secret exposure, credential scope
-    │   └── resource.md      # Resource limits, governance, and LLM token accounting
+    │   └── resource.md      # Rate ceilings, token budgets, and governance
     └── zh/
         ├── overview.md      # 共享模型、合并语义、原则、分级、影子评估、限时授权、兼容性
         ├── network.md       # 网络子策略
@@ -100,7 +100,7 @@
         ├── exec.md          # 命令执行子策略
         ├── process.md       # 提权、持久化与系统调用子策略
         ├── identity.md      # 工作负载身份、秘密暴露、凭据作用域
-        └── resource.md      # 资源限制、治理与 LLM Token 计量
+        └── resource.md      # 速率上限、Token 预算与治理
 ```
 
 ---

@@ -24,7 +24,7 @@
 | **命令执行（Exec）** — 可以执行哪些命令、以哪个用户身份、最长多久、最多几个并发 | [exec.md](./exec.md) |
 | **进程（Process）** — 已在运行的进程可以做什么：提权、持久化、系统调用 | [process.md](./process.md) |
 | **身份（Identity）** — 沙箱可以使用哪些凭据，以及它们以何种形式抵达沙箱 | [identity.md](./identity.md) |
-| **资源（Resource）** — 稳态配额、按窗口限额（分钟–月 + 生命周期）与 LLM Token 计量 | [resource.md](./resource.md) |
+| **资源（Resource）** — 请求/磁盘速率上限、按窗口的 Token 预算（分钟–月 + 生命周期）与 Token 计量 | [resource.md](./resource.md) |
 
 沙箱与 ECS 实例不同，它不只是网络端点，而是一个**执行着部分可信、由 Agent 生成的代码的执行环境**。因此它的"安全组"不仅要治理网络可达性，还必须治理这些代码能触碰哪些文件、能执行什么命令、能消耗多少资源 —— 否则边界就是不完整的。
 
@@ -56,7 +56,7 @@
 | 命令执行 | 每请求级 `timeout`、`user`、`cwd`。 | 没有沙箱级策略：没有命令允许/拒绝列表、没有用户限制、没有并发上限、没有总时长上限、没有审计轨迹。 |
 | 进程 | 面向用户的能力为零。沙箱之间的进程与 PID 隔离是基质的**属性**（§12.3），不是策略能声明的东西。 | 完全没有策略面：提权、持久化与系统调用暴露面都无法被声明式地约束 —— 尽管强制执行机制早已存在于 API 之下，[filesystem.md](./filesystem.md) §11 已经在设想"等效的系统调用级强制执行"。 |
 | 身份 | 什么都没有。凭据以环境变量或文件的形式抵达沙箱，而沙箱内任何代码都能读到它们。 | 没有任何策略面：没有工作负载身份、没有目的地绑定的注入、没有暴露模式、没有 TTL 或吊销。§2.3 的纵深防御矩阵已经承认 `denyPaths` 保护不了已在进程内存里、或经环境变量传入的秘密 —— 而那正是秘密今天所在的地方。 |
-| 资源 | 稳态 CPU/内存配额；空闲超时支持 kill/pause。 | 没有按窗口限额（分钟–月）与生命周期预算；没有带宽上限；没有 LLM Token 计量；没有超限动作、通知与人工审批流程。 |
+| 资源 | 稳态 CPU/内存配额，由普通编排配置设定；空闲超时支持 kill/pause。 | 出站请求与磁盘 I/O 没有速率上限；没有按窗口的 Token 预算（分钟–月）与生命周期预算；没有 Token 计量；没有超限动作、通知与人工审批流程。 |
 
 ### 2.2 为什么需要统一对象
 
@@ -77,7 +77,7 @@
 | --- | --- | --- | --- |
 | **网络** | 数据外泄；触及内部服务与元数据端点 | 离开沙箱的每一个包，无论由哪个进程发出 | 代码在本地做了什么；已经从允许通道流出的数据 |
 | **文件系统** | 沙箱内凭据窃取；对沙箱能在磁盘上触及之物（无论是否挂载）的滥用 | **所有**进程的每一次文件系统访问 | 已进入进程内存或以环境变量传入的凭据；以及那些宿主路径当初是否被挂载进来 |
-| **资源** | 失控循环、Token 烧钱、吵邻效应 | 内核记账 + 出站 HTTP 计量，按沙箱统计 | 有害但很便宜的行为 |
+| **资源** | Token 烧钱、吵邻效应 | 基质速率限制器 + 出站 HTTP 计量，按沙箱统计 | 有害但很便宜的行为；不花 Token 的失控循环（[resource.md](./resource.md) §1） |
 | **进程** | 工作负载**自行**启动的进程的提权、非预期持久化、系统调用面滥用 | 沙箱运行的每一个进程，在内核边界上 | 进程在已获授权范围内的正当行为 |
 | **身份** | 沙箱内代码对长期凭据的窃取与复用 | 沙箱之外的凭据签发与出站代理路径 | 一个工作负载在其作用域内正当使用过的凭据，在该作用域存续期间 |
 | **命令执行** | 通过**控制接口**抵达的注入命令或误操作 | 仅限由沙箱控制接口发起的执行 | 工作负载自行启动的进程 |
@@ -215,7 +215,7 @@ GET /policies/{id}/revisions/{rev}          单份不可变策略档修订
 | 模式字段（`exec.mode`、`filesystem.mode`、`process.mode`、`process.syscall.mode`） | 最严格者胜出。 |
 | 违规动作（`onViolation`、`onExceeded`） | 最严重的动作胜出（§8.1.7、[resource.md](./resource.md) §10）。 |
 | `enforcement` | `strict` 胜出。低优先级的 `strict` **不得**被降级为 `bestEffort`（§8.2.2 规则 2），此类尝试被拒绝而不是被遮蔽。 |
-| **只能收窄的限制** | 低优先级来源贡献的限制，**不得**被高优先级来源移除、覆盖或打洞。高优先级可以收窄边界，但永远不能放宽它。各模块规格逐一列出受本规则约束的字段 —— 网络的绑定性拒绝、`network.internal.mode` 与两个 `defaultAction` 字段、`exec.allowedUsers`、`filesystem.baselineExceptions`、`process.noNewPrivileges` 与 `process.allowedCapabilities`、`resource.limits`。唯一且有界的例外是限时授权（§5.1）。 |
+| **只能收窄的限制** | 低优先级来源贡献的限制，**不得**被高优先级来源移除、覆盖或打洞。高优先级可以收窄边界，但永远不能放宽它。各模块规格逐一列出受本规则约束的字段 —— 网络的绑定性拒绝、`network.internal.mode` 与两个 `defaultAction` 字段、`exec.allowedUsers`、`filesystem.baselineExceptions`、`process.noNewPrivileges` 与 `process.allowedCapabilities`、`resource.rate` 与 `resource.limits`。唯一且有界的例外是限时授权（§5.1）。 |
 
 当高优先级来源申请了只能收窄规则所禁止的事情，模块规格**必须**指定两种结果之一，而绝不允许静默的第三种：拒绝请求（`400`，用于直接矛盾，如把一个布尔值翻回去），或接受请求并在响应的 `policyWarnings` 数组中报告不生效的部分（用于仅被遮蔽的条目）。
 
@@ -316,7 +316,7 @@ DELETE /sandboxes/{id}/grants/{grantID}    提前撤销
 | 命令执行 | `unrestricted` 模式 + 总时长超时上限，外加 metadata 审计。 | `allowlist` 模式更严；`audit: none` 是审计轨迹的退出方式。 |
 | 进程 | 拒绝与逃逸相邻的系统调用（`syscall/1`）、不许提权、不许以 root 运行、不许后台化。 | `noNewPrivileges: false`、`runAsNonRoot: false`、`allowDaemonize: true`，或 `mode: unrestricted`。 |
 | 身份 | 没有任何秘密以沙箱内代码可读的形式抵达沙箱（[identity.md](./identity.md) §6）。 | 为每个秘密显式指定 `exposure` 模式。 |
-| 资源 | 配额默认继承模板；无按窗口限额；`onExceeded: hold`。 | 显式设置限额与另一个动作。 |
+| 资源 | 无速率上限；无按窗口限额；`onExceeded: hold`。 | 显式设置上限、限额与另一个动作。 |
 
 ### 7.1 策略分级（policy tiers）
 
@@ -351,7 +351,7 @@ policy:
 | 命令执行 | `mode: unrestricted`、`maxTimeoutSec: 3600` | `mode: unrestricted`、`maxTimeoutSec: 3600` | `mode: unrestricted`、`maxTimeoutSec: 3600`、`audit: metadata` |
 | 进程 | `mode: baseline`、`syscall.mode: baseline` | `mode: baseline`、`syscall.mode: baseline` | `mode: baseline`、`syscall.mode: baseline`、`noNewPrivileges: true`、`runAsNonRoot: true`、`allowDaemonize: false`、`audit: metadata` |
 | 身份 | `mode: unrestricted` | `mode: managed` | `mode: managed`、`defaultExposure: proxy` |
-| 资源 | 模板配额、无按窗口限额 | 模板配额、无按窗口限额 | 模板配额、`onExceeded: hold` |
+| 资源 | 无上限、无按窗口限额 | 无上限、无按窗口限额 | 无上限、`onExceeded: hold` |
 
 `tier: unrestricted` 展开为各模块已文档化的退出方式 —— `network.egress.defaultAction: allow` 与 `ingress.defaultAction: allow` 且不追加任何拒绝、`filesystem.mode: unrestricted`、`exec.mode: unrestricted`、`process.mode: unrestricted`、`identity.mode: unrestricted`。它**不**放宽 `network.internal.mode`，后者在每个分级下都是 `deny`（[network.md](./network.md) §6）：访问私有网络是一个关于部署拓扑的陈述，没有一个分级能替它做出。它是给可信、人类编写的工作负载用的分级，且它的每一次使用都可见于生效策略及其快照。
 
@@ -591,7 +591,7 @@ policy:
 | --- | --- |
 | **0** | 本提案集在跟踪 Issue 中评审；开放问题逐项收敛为决策。 |
 | **1** | `SandboxPolicy` API 模型；遗留字段规范化；`policy.network` 端到端 —— 两个方向、优先级排序、四层规则与 `internal.mode`；冲突检测；生效策略的版本化与快照（§4.1）；违规响应模型及其常开的违规事件（§8.1）；能力集、`GET /capabilities`、`policy.enforcement` 与失效字段上报（§8.2）；并发控制与 `status`（§4.2、§4.3）；主体与权限矩阵（§5.2）；机器可读 schema 与合规性套件（§11.16）；SDK `policy=`。 |
-| **2** | 资源域：配额合并、按窗口限额（`minute`–`month` + `lifetime`）、`onExceeded` 动作（`warn`/`pause`/`hold`/`kill`）、通知与 webhook、hold 审批 API、用量暴露。 |
+| **2** | 资源域：带整形计数的速率上限、按窗口的 Token 预算（`minute`–`month` + `lifetime`）、`onExceeded` 动作（`warn`/`pause`/`hold`/`kill`）、通知与 webhook、hold 审批 API、用量暴露。 |
 | **3** | 文件系统：基线敏感路径保护、`readOnlyPaths` / `denyPaths` / `writableRoots`。 |
 | **4** | 命令执行：模式、用户限制、超时上限、并发、审计、带类型的拒绝。 |
 | **5** | 策略档（`/policies`）、策略档修订、`policyID` 绑定、支持模块的热更新、LLM Token 计量。 |
@@ -611,7 +611,7 @@ policy:
 6. **授权主体。** 哪些主体可以签发授权 —— 沙箱所有者、命名空间运维，还是两者皆可？最大 TTL 是否应随分级不同（`restricted` 下更短）？是否有些字段无论上限如何都应永久不可授权？
 7. **聚合与按窗口的资源治理。** 命名冲突已通过把 [resource.md](./resource.md) 的那个字段改名为 `allowance` 解决，其后仍留下两处缺口：`onExceeded` 是否应当可以按窗口而不是按维度设置（那里的 §13.7），以及固定窗口在其边界处是否需要突发平滑。两者都是对一个已可工作的模型的细化，而不是阻塞项。
 8. **任务级策略。** 需求方要求按 Agent、按任务的策略，而本文档定义的最小作用域是沙箱。任务是否是一等作用域，带自己的生效策略与审计身份；还是说"按任务授权"恰好就是 §5.1 的授权已经提供的东西？若是前者，什么东西在控制面上标识一个任务？
-9. **可达性与消耗量。** 出站端口/协议规则在 `network`，带宽在 `resource.quota`。这条缝（可以访问什么 vs 可以消耗多少）划得对吗，还是用户应该能在一处写出"到这个 CIDR 的 443，最多 10 Mbit/s"？
+9. **可达性与消耗量。** 出站端口/协议规则在 `network`，请求速率上限在 `resource.rate`。这条缝（可以访问什么 vs 可以用得多快）划得对吗，还是用户应该能在一处写出"到这个 CIDR 的 443，最多 10 请求/秒"？
 10. **组合策略档。** 一个沙箱最多引用一份策略档（§4）。云安全组是可组合的 —— 一台实例挂载多个，生效规则集是它们的组合 —— 这就是"基础锁定"与"可访问 GitHub"能够保持为各自独立、可复用的对象，而不必被复制进每一份两者都需要的策略档的原因。沙箱是否应该能引用多份策略档？合并规则必须写得很小心，因为多份策略档是**对等的**、彼此之间没有优先级：allow 类列表会取并集，deny 类列表会取并集且其中每一条都是绑定性的（[network.md](./network.md) §4.6），mode 与标量取最严格的值，而交集类字段（`allowedCapabilities`、`syscall.allowedSyscalls`、`baselineExceptions`）取交集。注意这刻意**不是**安全组的规则 —— 安全组对 allow 取并集且完全没有 deny；在这里对对等来源的 allow 取并集会让一份宽松的策略档放宽一份严格的策略档，而这是 §5 所禁止的。
 11. **身份型出站目标 —— 部分解决。** [network.md](./network.md) §2.2 现在定义了带 `allowedPeers` 列表的 `internal.mode: identity`，而 §2.3 给一条四层规则一个 `sandboxGroup` 对象，所以基于身份的可达性的*语法*已经存在，而过去挡住它的那条无条件私网拒绝也已消失。仍未解决的是名字背后的一切：控制面里仍没有一个沙箱分组概念，所以没有东西定义一个组是什么、谁可以把一个沙箱加进去、成员身份本身是否是一个策略字段。在那存在之前，`identity` 模式是一个其对象无法被解析的字段。这个问题原来的提法 —— 每个出站目标都是一个地址、一个 CIDR，或一个解析到其一的名字 ——
 12. **模拟一份候选策略。** §7.2 影子的是一个**分级**，这是刻意的，因为分级是单个取值加一份已发布的展开内容。它不回答"我正要写的这份策略会产生什么效果" —— 也就是安全组的 `DryRun` 与可达性分析器所回答的那个问题。当五个模块、分级展开、来源标记、绑定性拒绝、遮蔽警告与限时授权全部叠加在一起时，作者除了真去创建一个沙箱，无法预判生效结果。是否应该提供只读的 `POST /policies:simulate`（返回完整展开后的生效策略）与 `POST /sandboxes/{id}/policy:explain`（针对一个假设的操作返回判定、命中规则与贡献来源）？两者都是只读且不改变任何语义的，这让它成为一个范围问题而不是风险问题。
@@ -650,7 +650,7 @@ policy:
 | `process.noNewPrivileges` | 内核的 no-new-privileges 标记 |
 | `process.allowedCapabilities` | bounding 能力集 |
 | `process.runAsNonRoot` | 启动时的解析 uid 检查，加上拒绝 `setuid(0)` |
-| `resource.quota`、`resource.limits` | cgroup 计量与限额 |
+| `resource.rate.disk.*` | 基质 I/O 路径上的字节速率与操作速率限制 |
 | `network` 连接状态（§4.7） | 数据路径中的连接跟踪 |
 | `network` 四层规则用于地址与 CIDR | 在 L3/L4 按优先级顺序做包过滤 |
 | `network` 七层规则 | 路径上的 HTTP/HTTPS 代理，对 `https` 终结 TLS |
