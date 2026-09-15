@@ -8,7 +8,7 @@
 
 **Why it is needed.** A sandbox runs agent-generated, partially trusted code, so its blast radius is not only data exfiltration but credential theft, privilege escalation, runaway loops, and token burn. And a command allowlist does not contain an interpreter it already admitted — the boundary that matters sits *below* the control interface.
 
-**Six modules.** `network` (egress/ingress, stateful), `filesystem` (path-level read/write/execute rules), `exec` (a control-interface gate), `process` (privilege, persistence, syscalls), `identity` (which credentials reach the sandbox, and in what form), `resource` (rate ceilings, windowed token budgets, token accounting).
+**Six modules.** `network` (egress/ingress, stateful), `filesystem` (path-level read/write/execute rules), `exec` (a control-interface gate), `process` (privilege, persistence, syscalls), `identity` (identity naming, which credentials reach the sandbox, and in what form), `resource` (rate ceilings, windowed token budgets, token accounting).
 
 
 ## A few examples

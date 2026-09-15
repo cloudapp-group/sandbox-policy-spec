@@ -319,7 +319,7 @@ DELETE /sandboxes/{id}/grants/{grantID}    提前撤销
 | 文件系统 | 拒绝敏感凭据路径 —— 带版本的基线集合 `baseline/1`（`~/.ssh`、`~/.aws`、`~/.gnupg`、`/etc/shadow` 等）。 | `mode: unrestricted`，或为具名路径设 `baselineExceptions`。 |
 | 命令执行 | `unrestricted` 模式 + 总时长超时上限，外加 metadata 审计。 | `allowlist` 模式更严；`audit: none` 是审计轨迹的退出方式。 |
 | 进程 | 拒绝与逃逸相邻的系统调用（`syscall/1`）、不许提权、不许以 root 运行、不许后台化。 | `noNewPrivileges: false`、`runAsNonRoot: false`、`allowDaemonize: true`，或 `mode: unrestricted`。 |
-| 身份 | 没有任何秘密以沙箱内代码可读的形式抵达沙箱（[identity.md](./identity.md) §6）。 | 为每个秘密显式指定 `exposure` 模式。 |
+| 身份 | 没有任何秘密以沙箱内代码可读的形式抵达沙箱（[identity.md](./identity.md) §7）。 | 为每个秘密显式指定 `exposure` 模式。 |
 | 资源 | 无速率上限；无按窗口限额；`onExceeded: hold`。 | 显式设置上限、限额与另一个动作。 |
 
 ### 7.1 策略分级（policy tiers）

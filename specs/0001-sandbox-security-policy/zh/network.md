@@ -76,7 +76,7 @@ policy:
 | --- | --- |
 | `deny`（默认） | 到 §4.2 私有网段的流量在任一方向上都不通。这是今天的行为。 |
 | `allow` | 私有网段可达，受 §4.1 的普通规则约束。 |
-| `identity` | 仅对 `allowedPeers` 中所列的对象可达，由平台从沙箱身份而非从地址解析。 |
+| `identity` | 仅对 `allowedPeers` 中所列的对象可达，由平台从对象身份而非从地址解析 —— 身份的命名见 [identity.md](./identity.md) §2。 |
 
 1. `internal` 管辖 **`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16` 与 `169.254.0.0/16`**（§4.2）。它在每条规则之前求值，所以在 `deny` 下，没有任何优先级或来源的 `allow` 规则能触及那些网段。
 2. `identity` 模式是不写 CIDR 就表达「这些沙箱可以互相通信」的方式。`allowedPeers` 条目由平台解析；调用方**不得**指名一个它无权访问的对象（[overview.md](./overview.md) §5.2）。
@@ -99,7 +99,7 @@ peer:
 2. `domains` 仅在**出站**有意义。入站规则上的域名**必须**以 `400 INVALID_POLICY` 拒绝：一个入站连接的来源是地址，把它与名字匹配需要一次由发送方控制的反向查询。
 3. 域名条目通过 DNS 学习实现（§4.3），而这是本模块在不同部署之间最大的能力差异（§11）。
 4. `sandboxGroup` 需要 `internal.mode: identity` 才有任何效果；在 `deny` 下指名一个**必须**产生一条 `policyWarnings` 条目 `{reason: "peer_unreachable_under_internal_deny"}`，而不是静默的空操作。
-5. 这是其他模块提到网络目标时所指的那套语法 —— [identity.md](./identity.md) §4.1 就是其中之一。
+5. 这是其他模块提到网络目标时所指的那套语法 —— [identity.md](./identity.md) §5.1 就是其中之一；`sandboxGroup` 与 `allowedPeers` 背后的对象身份如何命名，见 [identity.md](./identity.md) §2。
 
 ### 2.4 `HTTPMatch` 与 `NamedHTTPMatch`
 
@@ -366,7 +366,7 @@ network:                 # tier: compatibility —— 仅旧路径
 ## 11. 非规范性说明
 
 - **实现路径。** 四层规则、连接状态（§4.7）与优先级排序在两种基质上都是通用件（[overview.md](./overview.md) §12.2）：包过滤、conntrack 与一份有序规则集。有两个面不是。**域名条目**需要把名字解析时的学习接进过滤器，外加对解析器的独占控制（§4.3.1）。**七层匹配器**需要路径上一个终结连接的代理 —— 而对 `https`，那意味着终结 TLS，没有它就只有 SNI 可见，`path`、`headers`、`queryParams` 与 `cookies` 根本无法求值。一个终结 TLS 的部署在那一点以明文读取它租户的流量，这是一个自带合规分量的决定；一个不终结的部署**必须**把那些匹配器声明为 `unsupported`，而不是静默地只按 SNI 匹配。
-- 本模块为 `l7` 规则所需的那个七层代理，正是 [identity.md](./identity.md) §3.1 为 `exposure: proxy` 所需、[resource.md](./resource.md) §14 为 Token 计量所需的同一个组件。一套机制，三个模块 —— 这是先建它的最强论据。
+- 本模块为 `l7` 规则所需的那个七层代理，正是 [identity.md](./identity.md) §4.1 为 `exposure: proxy` 所需、[resource.md](./resource.md) §14 为 Token 计量所需的同一个组件。一套机制，三个模块 —— 这是先建它的最强论据。
 - **关于沿用 `HTTPRoute` 而非另起炉灶。** §2.4 的匹配器形状刻意就是 Gateway API 的，连 `type` 枚举都是，因为一位写过 `HTTPRoute` 的运维不该为同一件事学第二套语法。两处新增被作为新增陈述：`cookies`（§2.4.3），`HTTPRoute` 把它折进 header；以及 `action: deny`，`HTTPRoute` 没有这个概念，因为一条路由不是一道防火墙。
 - **被拒的替代方案 —— 隐式隔离。** 一个 Kubernetes NetworkPolicy 一旦有任何策略选中它的目标，就把该方向翻成默认拒绝。它很有吸引力，因为它使常见意图无法被不完整地表达。它在此被拒，因为 `defaultAction` 在一处可见的地方显式说了同样的话，而隐式隔离会把每一份在通用互联网访问旁列出几条 allow 条目的既有配置，静默地转成一个全拒沙箱。
 - **被拒的替代方案 —— 两个方向共用一份合并规则列表。** 一份带按规则 `direction` 字段的单一列表更紧凑，也是某些安全组 API 的做法。它在此被拒，因为优先级唯一性（§4.5.3）是按方向的，而一份共享列表要么使该约束全局化 —— 无理由地耦合入站与出站编号 —— 要么要求一个读者必须记住的复合键。

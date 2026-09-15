@@ -23,7 +23,7 @@
 | **Filesystem** | 宿主机挂载边界与沙箱内路径访问策略（`denyPaths`、`readOnlyPaths`、`writableRoots`） |
 | **Exec** | 命令白名单/黑名单、用户限制、超时上限、并发限制、审计 |
 | **Process** | 已运行进程的提权、持久化与系统调用策略 |
-| **Identity** | 工作负载身份、秘密暴露模式、目的地绑定的凭据注入、TTL 与吊销 |
+| **Identity** | Agent 与工具的身份命名、工作负载身份、秘密暴露模式、目的地绑定的凭据注入、TTL 与吊销 |
 | **Resource** | 请求/磁盘速率上限与整形计数、窗口化 Token 预算（分钟–月 + 生命周期）、Token 计量、超限处置 |
 
 规范以七文档集合的形式组织在 `specs/0001-sandbox-security-policy/` 目录下，JSON Schema 位于 `schema/`，合规性 fixtures 位于 `fixtures/`。
@@ -95,7 +95,7 @@
     │   ├── filesystem.md    # Filesystem sub-policy
     │   ├── exec.md          # Command execution sub-policy
     │   ├── process.md       # Privilege, persistence, and system-call sub-policy
-    │   ├── identity.md      # Workload identity, secret exposure, credential scope
+    │   ├── identity.md      # Identity naming, workload identity, secret exposure, credential scope
     │   └── resource.md      # Rate ceilings, token budgets, and governance
     └── zh/
         ├── overview.md      # 共享模型、合并语义、原则、分级、影子评估、限时授权、兼容性
@@ -103,7 +103,7 @@
         ├── filesystem.md    # 文件系统子策略
         ├── exec.md          # 命令执行子策略
         ├── process.md       # 提权、持久化与系统调用子策略
-        ├── identity.md      # 工作负载身份、秘密暴露、凭据作用域
+        ├── identity.md      # 身份命名、工作负载身份、秘密暴露、凭据作用域
         └── resource.md      # 速率上限、Token 预算与治理
 ```
 

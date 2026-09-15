@@ -76,7 +76,7 @@ The private ranges a sandbox sits inside are the one part of the address space w
 | --- | --- |
 | `deny` (default) | No traffic to the private ranges of §4.2, in either direction. This is today's behaviour. |
 | `allow` | The private ranges are reachable, subject to the ordinary rules of §4.1. |
-| `identity` | Reachable only for the peers named in `allowedPeers`, resolved by the platform from sandbox identity rather than from an address. |
+| `identity` | Reachable only for the peers named in `allowedPeers`, resolved by the platform from object identity rather than from an address — for how identities are named, see [identity.md](./identity.md) §2. |
 
 1. `internal` governs **`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, and `169.254.0.0/16`** (§4.2). It is evaluated before every rule, so under `deny` no `allow` rule of any priority or provenance reaches those ranges.
 2. `identity` mode is how "these sandboxes may talk to each other" is expressed without anyone writing a CIDR. `allowedPeers` entries are resolved by the platform; a caller MUST NOT be able to name a peer it is not authorised to reach ([overview.md](./overview.md) §5.2).
@@ -99,7 +99,7 @@ peer:
 2. `domains` is meaningful on **egress only**. A domain on an ingress rule MUST be rejected with `400 INVALID_POLICY`: the source of an inbound connection is an address, and matching it against a name would require a reverse lookup the sender controls.
 3. Domain entries are realised through DNS learning (§4.3), and this is the module's largest capability difference between deployments (§11).
 4. `sandboxGroup` requires `internal.mode: identity` to have any effect; naming one under `deny` MUST produce a `policyWarnings` entry `{reason: "peer_unreachable_under_internal_deny"}` rather than a silent no-op.
-5. This is the grammar other modules mean when they refer to a network target — [identity.md](./identity.md) §4.1 among them.
+5. This is the grammar other modules mean when they refer to a network target — [identity.md](./identity.md) §5.1 among them; for how the object identities behind `sandboxGroup` and `allowedPeers` are named, see [identity.md](./identity.md) §2.
 
 ### 2.4 `HTTPMatch` and `NamedHTTPMatch`
 
@@ -366,7 +366,7 @@ The legacy surface is permanent. Each legacy field is normalised into the struct
 ## 11. Non-normative notes
 
 - **Implementation paths.** L4 rules, connection state (§4.7), and priority ordering are commodity on both substrates ([overview.md](./overview.md) §12.2): packet filtering, conntrack, and an ordered rule set. Two surfaces are not. **Domain entries** need name-resolution-time learning wired into the filter plus exclusive control of the resolver (§4.3.1). **L7 matchers** need a proxy in the path that terminates the connection — and for `https`, that means terminating TLS, without which only the SNI is visible and `path`, `headers`, `queryParams`, and `cookies` cannot be evaluated at all. A deployment that terminates TLS is reading its tenants' traffic in cleartext at that point, which is a decision with its own compliance weight; a deployment that does not MUST declare those matchers `unsupported` rather than silently matching on SNI alone.
-- The L7 proxy this module needs for `l7` rules is the same component [identity.md](./identity.md) §3.1 needs for `exposure: proxy` and [resource.md](./resource.md) §14 needs for token metering. One mechanism, three modules — which is the strongest argument for building it first.
+- The L7 proxy this module needs for `l7` rules is the same component [identity.md](./identity.md) §4.1 needs for `exposure: proxy` and [resource.md](./resource.md) §14 needs for token metering. One mechanism, three modules — which is the strongest argument for building it first.
 - **On following `HTTPRoute` rather than inventing.** The matcher shapes in §2.4 are deliberately Gateway API's, down to the `type` enums, because an operator who has written an `HTTPRoute` should not have to learn a second grammar for the same job. The two additions are stated as additions: `cookies` (§2.4.3), which `HTTPRoute` folds into headers, and `action: deny`, which `HTTPRoute` has no notion of because a route is not a firewall.
 - **Rejected alternative — implicit isolation.** A Kubernetes NetworkPolicy flips its target to default-deny for a direction as soon as any policy selects it. It is attractive, because it makes the common intent impossible to express incompletely. It is rejected here because `defaultAction` says the same thing explicitly and in one visible place, whereas implicit isolation would silently convert every existing configuration that lists a few allow entries alongside general internet access into a deny-all sandbox.
 - **Rejected alternative — one merged rule list for both directions.** A single list with a `direction` field per rule is more compact and is what some security-group APIs do. It is rejected because priority uniqueness (§4.5.3) is per direction, and a shared list would either make the constraint global — coupling inbound and outbound numbering for no reason — or require a compound key that readers would have to remember.

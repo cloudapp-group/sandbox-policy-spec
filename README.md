@@ -23,7 +23,7 @@ This proposal defines the `SandboxPolicy` object: the equivalent of a cloud secu
 | **Filesystem** | Host-mount boundaries and in-sandbox path access policy (`denyPaths`, `readOnlyPaths`, `writableRoots`) |
 | **Exec** | Command allowlist/denylist, user restriction, timeout ceiling, concurrency limits, audit |
 | **Process** | Privilege gain, persistence, and system-call policy for already-running processes |
-| **Identity** | Workload identity, secret exposure modes, destination-bound credential injection, TTL and revocation |
+| **Identity** | Identity naming for agents and tools, workload identity, secret exposure modes, destination-bound credential injection, TTL and revocation |
 | **Resource** | Request/disk rate ceilings with shaping counters, windowed token budgets (minute–month + lifetime), token accounting, exceed actions |
 
 The specification is organized as a seven-document set under `specs/0001-sandbox-security-policy/`, with a JSON Schema under `schema/` and conformance fixtures under `fixtures/`.
@@ -95,7 +95,7 @@ The design is guided by six principles:
     │   ├── filesystem.md    # Filesystem sub-policy
     │   ├── exec.md          # Command execution sub-policy
     │   ├── process.md       # Privilege, persistence, and system-call sub-policy
-    │   ├── identity.md      # Workload identity, secret exposure, credential scope
+    │   ├── identity.md      # Identity naming, workload identity, secret exposure, credential scope
     │   └── resource.md      # Rate ceilings, token budgets, and governance
     └── zh/
         ├── overview.md      # 共享模型、合并语义、原则、分级、影子评估、限时授权、兼容性
@@ -103,7 +103,7 @@ The design is guided by six principles:
         ├── filesystem.md    # 文件系统子策略
         ├── exec.md          # 命令执行子策略
         ├── process.md       # 提权、持久化与系统调用子策略
-        ├── identity.md      # 工作负载身份、秘密暴露、凭据作用域
+        ├── identity.md      # 身份命名、工作负载身份、秘密暴露、凭据作用域
         └── resource.md      # 速率上限、Token 预算与治理
 ```
 

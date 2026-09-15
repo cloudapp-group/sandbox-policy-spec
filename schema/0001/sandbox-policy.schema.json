@@ -490,7 +490,8 @@
               "type": "array",
               "items": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "pattern": "^(agent|tool)://(system|user)/[^/]+/[^/]+/[^/]+$"
               }
             },
             "ttlSec": {
@@ -500,7 +501,7 @@
           },
           "allOf": [
             {
-              "description": "identity.md §5.2: audience is required and non-empty when enabled.",
+              "description": "identity.md §6.2: audience is required and non-empty when enabled, and every entry is a §2 identity URI.",
               "if": {
                 "properties": {
                   "enabled": {
@@ -612,7 +613,7 @@
       },
       "allOf": [
         {
-          "description": "identity.md §4.1: destinations is required and non-empty for exposure: proxy.",
+          "description": "identity.md §5.1: destinations is required and non-empty for exposure: proxy.",
           "if": {
             "properties": {
               "exposure": {
@@ -635,7 +636,7 @@
           }
         },
         {
-          "description": "identity.md §2.1.3: a binding MUST NOT carry fields its exposure mode does not use.",
+          "description": "identity.md §3.1.3: a binding MUST NOT carry fields its exposure mode does not use.",
           "if": {
             "properties": {
               "exposure": {
@@ -1073,7 +1074,7 @@
       }
     },
     "egressTarget": {
-      "description": "A network target in string form: IPv4 address, IPv4 CIDR, DNS name, or leading-'*.' wildcard. This is the spelling identity.md §4.1 uses for `destinations`; network.md §2.3 splits the same grammar into typed `peer.cidrs` / `peer.domains` fields.",
+      "description": "A network target in string form: IPv4 address, IPv4 CIDR, DNS name, or leading-'*.' wildcard. This is the spelling identity.md §5.1 uses for `destinations`; network.md §2.3 splits the same grammar into typed `peer.cidrs` / `peer.domains` fields.",
       "type": "string",
       "pattern": "^((\\d{1,3}(\\.\\d{1,3}){3}(/\\d{1,2})?)|((\\*\\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*))$"
     },

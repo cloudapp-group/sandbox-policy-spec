@@ -319,7 +319,7 @@ The table below is the `restricted` tier, the default for any policy that is pre
 | Filesystem | Sensitive credential paths denied — versioned baseline set `baseline/1` (`~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc/shadow`, ...). | `mode: unrestricted`, or `baselineExceptions` for named paths. |
 | Exec | `unrestricted` mode with a wall-clock timeout ceiling, plus metadata auditing. | Allowlist mode is stricter; `audit: none` opts out of the audit trail. |
 | Process | Escape-adjacent system calls denied (`syscall/1`), no privilege gain, no root, no backgrounding. | `noNewPrivileges: false`, `runAsNonRoot: false`, `allowDaemonize: true`, or `mode: unrestricted`. |
-| Identity | No secret reaches the sandbox in a form its code can read ([identity.md](./identity.md) §6). | An explicit `exposure` mode per secret. |
+| Identity | No secret reaches the sandbox in a form its code can read ([identity.md](./identity.md) §7). | An explicit `exposure` mode per secret. |
 | Resource | No rate ceilings; no windowed limits; `onExceeded: hold`. | Explicit ceilings, explicit limits, and a different action. |
 
 ### 7.1 Policy tiers
