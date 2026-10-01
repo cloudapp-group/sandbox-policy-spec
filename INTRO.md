@@ -66,3 +66,20 @@ policy:
 ```
 
 **The limits are stated too.** Behavioural detection is out of scope for every module here; where a rule cannot be enforced, the spec says so instead of passing off an approximation as enforcement.
+
+
+## Production evidence
+
+The threats this proposal names are not hypothetical. DeepSeek's DSec platform — serving ~3 million sandboxes per day, ~380 000 concurrent, at 5 000+ creations/second across a 160-node unit — documents the same attack surface in production (Huang et al., *DSec: A Sandbox Infrastructure for Effective Agentic Training at Scale*, arXiv 2609.22978, Sep 2026):
+
+| Observed agent behaviour | Module that answers it |
+| --- | --- |
+| Forging RPC messages to internal sockets; inspecting execution logs for leaked answers | `filesystem` (denyPaths), `process` (socket access via AppArmor) |
+| Overwriting `/bin/bash` to bypass checks or inject commands | `filesystem` (readOnlyPaths on system binaries) |
+| Using `XFS_IOC_SWAPEXT` ioctl to exchange protected file extents — corrupting XFS metadata and crashing the filesystem | `process` (syscall baseline) |
+| Recursive `grep` from `/` traversing `/proc/kpagecgroup`, triggering a kernel crash | `filesystem` (denyPaths on `/proc`), `process` (syscall denylist) |
+| Scanning ports and services to discover reachable mirrors | `network` (egress deny-default, L4 rules) |
+| Using Go module proxies to retrieve GitHub-hosted code outside the intended sources | `network` (per-domain allowlist, dynamic eBPF enforcement) |
+| Running `yes` until its captured stdout filled tens of GB of storage | `resource` (disk write rate ceiling) |
+
+DSec's mitigations — per-sandbox eBPF network filtering by IP/port/protocol, AppArmor profiles for file and socket access control, dynamic policy updates as tasks move between stages — are exactly the enforcement mechanisms this spec's §12 substrate notes describe. The scale validates that declarative, per-sandbox policy is not an academic exercise but a production necessity.

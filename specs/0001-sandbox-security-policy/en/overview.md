@@ -681,6 +681,7 @@ Two surfaces genuinely differ, and these are the ones a capability set has to be
 - Inter-sandbox process isolation is a *property* of whichever substrate is in use, and deliberately absent from the policy object — there is no field for it because there is nothing for a user to decide.
 - Analogues studied: AWS Security Groups (including their stateful connection tracking and peer-group references), Kubernetes NetworkPolicy, Pod Security Standards and Pod Security Admission (whose `enforce`/`audit`/`warn` triple is what §7.2 adapts), E2B sandbox configuration.
 - The shape of §7.2 is a direct lesson from PodSecurityPolicy's replacement: the successor mechanism's most consequential addition was not a new control but the ability to *evaluate a stricter level without enforcing it*, because a security level nobody can rehearse is a security level nobody adopts. This proposal has three protections with exactly that adoption problem, which is why the mechanism is specified alongside the tiers rather than deferred.
+- **Production validation.** DeepSeek's DSec platform (Huang et al., arXiv 2609.22978, Sep 2026) operates at ~380 000 concurrent sandboxes and ~5 000 creations/second, and independently documents the agent misbehavior categories §2.3 names: agents forging RPC messages to internal sockets, overwriting `/bin/bash` to inject commands, exploiting `XFS_IOC_SWAPEXT` to bypass file access controls, scanning ports to discover unintended mirrors, using Go module proxies to retrieve code outside the allowed set, and filling tens of GB of storage with unbounded command output. Their mitigations — per-sandbox eBPF network filtering, AppArmor file/socket profiles, and dynamic task-specific policy updates — instantiate the enforcement mechanisms §12.2 describes on both substrates. The scale confirms that declarative, per-sandbox policy is an operational necessity for agentic workloads rather than a compliance formality.
 
 ## 13. References
 
@@ -688,3 +689,4 @@ Two surfaces genuinely differ, and these are the ones a capability set has to be
 - [Security Proxy](../../../guide/security-proxy.md) — current L7 rule grammar
 - [Restrict Public Access](../../../guide/restrict-public-access.md) — current ingress gating
 - [Authentication](../../../guide/authentication.md)
+- Huang, J. et al. *DSec: A Sandbox Infrastructure for Effective Agentic Training at Scale.* arXiv:2609.22978, DeepSeek-AI, Sep 2026. Production agent-sandbox platform; §6.4–6.5 document agent misbehavior and access-control mitigations.

@@ -66,3 +66,20 @@ policy:
 ```
 
 **边界也写清楚。** 行为检测不在范围内；无法强制之处明说，不用近似冒充。
+
+
+## 生产环境实证
+
+本提案所命名的威胁并非假设。DeepSeek 的 DSec 平台 —— 每日服务约 300 万个沙箱、峰值并发约 38 万、每秒 5000+ 创建速率、跨 160 节点单元 —— 在生产中记录了同样的攻击面（Huang et al., *DSec: A Sandbox Infrastructure for Effective Agentic Training at Scale*, arXiv 2609.22978, 2026 年 9 月）：
+
+| 观测到的 Agent 行为 | 回答它的模块 |
+| --- | --- |
+| 伪造 RPC 消息发往内部 socket；翻阅执行日志中的泄漏答案 | `filesystem`（denyPaths）、`process`（AppArmor socket 访问控制） |
+| 覆写 `/bin/bash` 以绕过检查或注入命令 | `filesystem`（系统二进制的 readOnlyPaths） |
+| 利用 `XFS_IOC_SWAPEXT` ioctl 交换受保护文件的 extent —— 损坏 XFS 元数据并导致文件系统崩溃 | `process`（syscall 基线集） |
+| 从 `/` 递归 `grep` 遍历 `/proc/kpagecgroup`，触发内核崩溃 | `filesystem`（`/proc` 的 denyPaths）、`process`（syscall 拒绝列表） |
+| 扫描端口和服务以发现可达镜像源 | `network`（出站默认拒绝、L4 规则） |
+| 利用 Go module proxy 获取非预期来源的 GitHub 代码 | `network`（按域名白名单、动态 eBPF 强制） |
+| 运行 `yes` 直到其捕获的 stdout 填满数十 GB 存储 | `resource`（磁盘写入速率上限） |
+
+DSec 的缓解措施 —— 按沙箱的 eBPF 网络过滤（IP/端口/协议）、AppArmor profile 控制文件与 socket 访问、任务在阶段间移动时动态更新策略 —— 恰恰是本规格 §12 基质注记所描述的那些强制机制。这一规模验证了声明式、按沙箱的策略不是学术演练，而是生产必需品。

@@ -681,6 +681,7 @@ VM 基质上无法同时满足这两条的部署，**必须**在它所声明的�
 - 沙箱之间的进程隔离是所用基质的一项*属性*，刻意不出现在策略对象里 —— 之所以没有对应字段，是因为没有任何东西需要用户来决定。
 - 参考过的类比对象：AWS Security Groups（含其有状态连接跟踪与对端安全组引用）、Kubernetes NetworkPolicy、Pod Security Standards 与 Pod Security Admission（其 `enforce`/`audit`/`warn` 三态正是 §7.2 所借鉴的）、E2B 沙箱配置。
 - §7.2 的形态直接来自 PodSecurityPolicy 被替换这件事的教训：其后继机制最有分量的新增并不是一项新控制，而是**在不强制的前提下求值一个更严档位**的能力 —— 因为一个没人能预演的安全档位，就是一个没人会采纳的安全档位。本提案里恰好有三项保护面临完全相同的落地问题，这也是这个机制与分级一并被规范、而没有被推迟的原因。
+- **生产验证。** DeepSeek 的 DSec 平台（Huang et al., arXiv 2609.22978, 2026 年 9 月）以约 38 万并发沙箱、每秒约 5000 次创建的规模运行，并独立记录了 §2.3 所命名的各类 Agent 不当行为：Agent 伪造 RPC 消息发往内部 socket、覆写 `/bin/bash` 以注入命令、利用 `XFS_IOC_SWAPEXT` 绕过文件访问控制、扫描端口发现非预期镜像源、通过 Go module proxy 获取允许范围之外的代码、以及用无界命令输出填满数十 GB 存储。其缓解措施 —— 按沙箱的 eBPF 网络过滤、AppArmor 文件/socket profile、以及动态的按任务策略更新 —— 正是 §12.2 在两种基质上所描述的强制机制的实例化。这一规模确认了声明式、按沙箱的策略对 Agent 工作负载而言是运维必需品，而非合规形式主义。
 
 ## 13. 参考资料
 
@@ -688,3 +689,4 @@ VM 基质上无法同时满足这两条的部署，**必须**在它所声明的�
 - [安全代理](../../../guide/security-proxy.md) — 现有 L7 规则语法
 - [限制公开访问](../../../guide/restrict-public-access.md) — 现有入站门控
 - [认证](../../../guide/authentication.md)
+- Huang, J. et al. *DSec: A Sandbox Infrastructure for Effective Agentic Training at Scale.* arXiv:2609.22978, DeepSeek-AI, 2026 年 9 月。生产级 Agent 沙箱平台；§6.4–6.5 记录了 Agent 不当行为与访问控制缓解措施。

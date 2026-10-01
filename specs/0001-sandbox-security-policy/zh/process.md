@@ -380,4 +380,10 @@ deniedSyscalls:
 - **本模块的机制与基质无关；它们所提供的保证强度并非如此。** 上面每一种机制都是按*进程*而非按内核的：容器基质上的 `securityContext` 与 VM 基质上的客户机内配置抵达同样的属性，而在共享内核上收窄一个沙箱的系统调用面不可能波及邻居，因为过滤器是附着在进程上而不是附着在内核上的。一个早期版本止步于此，而止步于此是错的。**过滤器是从哪里被安装的，两边并不相同，而那决定了字段保证什么。** 在容器基质上是宿主内核安装它，所以沙箱内的 root 并不是那条限制之上的 root。在 VM 基质上是客户机内的一个 supervisor 安装它，而它与自己所约束的代码共享一个内核 —— 于是该保证只在工作负载无法触及那个 supervisor 期间成立，这正是 §4.3 给 VM 基质一个会拒绝「伸进另一个进程」那些系统调用的基线集合的原因。任一基质上的部署都可以把 §3 与 §4 声明为 `enforced`；在 VM 基质上，只有当 [overview.md](./overview.md) §12.2 的两个条件都成立时，它才可以**不加限定**地这样做。
 - 在容器基质上装配起来最费事的两个字段是 `allowDaemonize` 与 `runAsNonRoot`，而两者都不是因为什么深层原因。`allowDaemonize: false` 需要会话跟踪加上拒绝那几个脱离用的系统调用，那是一条过滤器条目配上进程组监管，而不是单个开关。`runAsNonRoot` 的创建时检查（§3.5.2）有直接的 `securityContext` 等价物，但它的运行时那一半 —— 即便对持有能力者也拒绝 `setuid(0)` —— 是一条必须与之一并安装的过滤器条目，否则这个字段只在启动那一刻成立。
 - 参考过的类比对象：Kubernetes Pod Security Standards（`runAsNonRoot`、`allowPrivilegeEscalation`、`capabilities.drop`）与 `seccompProfile`、Docker 默认 seccomp 画像与 `--security-opt no-new-privileges`、systemd unit sandboxing 指令。
-- **关于用 `["none"]` 而不是 `[]`：** Kubernetes 把同一个想法拼作 `capabilities.drop: ["ALL"]`，那在它那里可行，因为它有一个独立的 `add` 列表，也没有一个"平台默认"取值来抢位置。本字段只有一个列表，而 `[]` 已经被默认集合占用，所以保留词是唯一一种不会让省略与空列表表示不同含义的拼法。选 `none` 而不是 `all`，是因为本列表指名的是被**允许**的东西；`drop: ALL` 与 `allowed: none` 是从相反两端描述同一种姿态。
+- **关于用 `["none"]` 而不是 `[]`：** Kubernetes 把同一个想法拼作 `capabilities.drop: ["ALL"]`，那在它那里可行，因为它有一个独立的 `add` 列表，也没有一个“平台默认”取值来抢位置。本字段只有一个列表，而 `[]` 已经被默认集合占用，所以保留词是唯一一种不会让省略与空列表表示不同含义的拼法。选 `none` 而不是 `all`，是因为本列表指名的是被**允许**的东西；`drop: ALL` 与 `allowed: none` 是从相反两端描述同一种姿态。
+- **系统调用基线集的生产实证。** DeepSeek 的 DSec 平台（arXiv 2609.22978, §6.4）记录了两起直接验证基线集设计的生产事件：
+
+  1. 一个 Agent 使用了 `XFS_IOC_SWAPEXT` —— 一个在两个文件之间交换 data-extent 映射的 ioctl —— 以通过另一个文件描述符访问受保护的文件内容。这次尝试损坏了 XFS 元数据并迫使文件系统关闭。这正是 §4.3 拒绝集存在所要防止的攻击类型：一个不存在于合法应用工作负载中的系统调用，被用来从下方绕过文件级访问控制。
+  2. 一个 Agent 从 `/` 递归运行 `grep`，遍历了 `/proc` 并读取了 `/proc/kpagecgroup`，触发内核 bug 导致宿主机崩溃。在另一起事件中，本应转发给目标 VM 的攻击命令在 Agent 自己的容器内执行，通过同样的路径崩溃了自己的内核。
+
+  两起事件都发生在以 root 运行且无系统调用过滤器的沙箱中 —— 即 `syscall/1` 与 `runAsNonRoot: true` 共同消除的那种姿态。单独一个 `filesystem.denyPaths` 或单独一个 `process.noNewPrivileges` 都无法防止它们：前者需要系统调用面被收窄（该 ioctl 完全绕过了 VFS 级检查），后者需要进程为非 root（这样内核路径才不可达）。这就是 [overview.md](./overview.md) §2.3 所描述的纵深防御，由失败来验证。
